@@ -1,0 +1,221 @@
+================================================================================
+                     AI EMAIL AUTOMATION - INSTALLATION GUIDE
+================================================================================
+
+================================================================================
+PREREQUISITES
+================================================================================
+- Python 3.10 or higher
+- Node.js 18 or higher
+- Git installed on your system
+
+================================================================================
+STEP 1: BACKEND SETUP
+================================================================================
+
+1. Navigate to the backend folder:
+   cd backend
+
+2. Create a virtual environment (recommended):
+   python -m venv venv
+
+3. Activate the virtual environment:
+   - Windows: venv\Scripts\activate
+   - Mac/Linux: source venv/bin/activate
+
+4. Install Python dependencies (all versions pinned in requirements.txt):
+
+   Core Framework:
+   ├── fastapi==0.115.0
+   ├── uvicorn[standard]==0.30.0
+   ├── pydantic==2.9.0
+   └── gunicorn==23.0.0
+
+   Environment & Data:
+   ├── python-dotenv==1.0.1
+   ├── pandas==2.3.3
+   ├── openpyxl==3.1.5
+   └── numpy==2.4.2
+
+   AI & Email:
+   ├── sentence-transformers==3.3.1
+   ├── requests==2.32.5
+   └── Pillow==12.1.0
+
+   Caching:
+   └── redis==5.2.1
+
+   Install via pip:
+   pip install -r requirements.txt
+
+   Or manually:
+   pip install fastapi==0.115.0 uvicorn[standard]==0.30.0 pydantic==2.9.0
+   pip install python-dotenv==1.0.1 pandas==2.3.3 openpyxl==3.1.5 numpy==2.4.2
+   pip install Pillow==12.1.0 requests==2.32.5 sentence-transformers==3.3.1
+   pip install gunicorn==23.0.0 redis==5.2.1
+
+================================================================================
+REDIS SETUP (OPTIONAL - FOR EMAIL CACHING)
+================================================================================
+
+Redis is optional. The app works without it (emails are fetched live).
+If you want Redis caching, install the server:
+
+   **Windows:**
+   Download Redis for Windows from:
+   https://github.com/microsoftarchive/redis/releases
+   - Download Redis-x64-3.0.504.msi and install
+   - Or use WSL: wsl sudo apt install redis
+
+   **macOS:**
+   brew install redis
+
+   **Linux (Ubuntu/Debian):**
+   sudo apt update
+   sudo apt install redis-server
+   sudo systemctl enable redis
+   sudo systemctl start redis
+
+   **Verify Redis is running:**
+   redis-cli ping
+   # Should return: PONG
+
+   Add these to backend/.env:
+   REDIS_HOST=localhost
+   REDIS_PORT=6379
+   REDIS_PASSWORD=
+   REDIS_DB=0
+
+5. Create a .env file in the backend folder with your credentials (also add Redis if installed):
+   SMTP_HOST=smtp.gmail.com
+   SMTP_PORT=587
+   SMTP_USER=your-email@gmail.com
+   SMTP_PASSWORD=your-app-password
+   SMTP_FROM=your-email@gmail.com
+   SMTP_USE_TLS=true
+   IMAP_HOST=imap.gmail.com
+   # Redis (optional):
+   REDIS_HOST=localhost
+   REDIS_PORT=6379
+   REDIS_PASSWORD=
+   REDIS_DB=0
+
+   For Google Mail, generate an App Password:
+   - Go to Google Account → Security
+   - Enable 2-Step Verification
+   - Go to App Passwords → Create new
+   - Use the 16-character password above
+
+================================================================================
+STEP 2: FRONTEND SETUP
+================================================================================
+
+1. Navigate to the frontend folder:
+   cd frontend
+
+2. Install Node.js dependencies (all versions pinned in package.json):
+
+   Runtime Dependencies:
+   ├── react@^19.2.6
+   ├── react-dom@^19.2.6
+   ├── react-router-dom@^6.30.3
+   ├── axios@^1.16.1
+   ├── framer-motion@^12.39.0
+   ├── lucide-react@^1.16.0
+   ├── tailwindcss@^4.3.0
+   ├── @tailwindcss/postcss@^4.3.0
+   ├── postcss@^8.5.14
+   └── autoprefixer@^10.5.0
+
+   Dev Dependencies:
+   ├── typescript@~6.0.2
+   ├── vite@^8.0.12
+   ├── @vitejs/plugin-react@^6.0.1
+   ├── eslint@^10.3.0
+   ├── @eslint/js@^10.0.1
+   ├── eslint-plugin-react-hooks@^7.1.1
+   ├── eslint-plugin-react-refresh@^0.5.2
+   ├── typescript-eslint@^8.59.2
+   ├── globals@^17.6.0
+   ├── @types/react@^19.2.14
+   ├── @types/react-dom@^19.2.3
+   ├── @types/node@^24.12.3
+   └── @types/react-router-dom@^5.3.3
+
+   Install with:
+   npm install
+
+================================================================================
+STEP 3: RUN THE APPLICATION
+================================================================================
+
+1. Start Backend (Terminal 1):
+   cd backend
+   uvicorn app.main:app --reload --port 8000
+
+   Backend will run at: http://localhost:8000
+   API Docs at: http://localhost:8000/docs
+
+2. Start Frontend (Terminal 2):
+   cd frontend
+   npm run dev
+
+   Frontend will run at: http://localhost:5173
+
+================================================================================
+USAGE GUIDE
+================================================================================
+
+INDIVIDUAL USERS:
+- Register with your Gmail and 16-character App Password
+- Use AI Agent to query your emails
+- Go to "Send Emails" to send bulk emails
+
+ORGANIZATIONS:
+- Register as Organization
+- Add sender accounts in "Senders" page
+- Set active sender before sending
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+CORS Error:
+- Make sure backend is running
+- Check .env has valid SMTP credentials
+
+Login Fails:
+- Verify App Password is correct (16 lowercase letters)
+- Check Google Account has 2-Step Verification enabled
+
+Emails Not Sending:
+- Verify SMTP credentials in .env
+- Check App Password is valid
+
+================================================================================
+PROJECT STRUCTURE
+================================================================================
+
+/backend
+  /app
+    main.py          - Main FastAPI application
+    database.py      - SQLite database operations
+    email_service.py - SMTP email sending
+    excel_utils.py   - Excel file parsing
+    schemas.py       - Pydantic models
+    vector_search.py - Email search functionality
+    ai_client.py     - AI integration
+  .env               - Environment variables (create this)
+  users.db           - SQLite database file
+  requirements.txt   - Python dependencies (pinned versions)
+
+/frontend
+  /src
+    /pages          - React page components
+    /components     - Reusable UI components
+    api.ts          - API client functions
+    types.ts        - TypeScript type definitions
+    AuthContext.tsx - Authentication context
+  package.json      - Node.js dependencies (pinned versions)
+
+================================================================================

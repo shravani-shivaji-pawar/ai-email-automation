@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+env/
+venv/
+
+# Node
+node_modules/
+# frontend/dist/
+frontend/.vite/
+
+# Env
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+*.db
+*.sqlite
+
+*.docx
+
+# Railway
+nixpacks.toml  # optional — keep if you want to commit it
+
+# Logs
+*.log
