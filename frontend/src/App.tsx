@@ -28,6 +28,8 @@ const AppRoutes: React.FC = () => {
           <Route path="/send-emails" element={<ProtectedRoute><SendEmailsPage /></ProtectedRoute>} />
           <Route path="/ai-agent" element={<ProtectedRoute><AiAgentPage /></ProtectedRoute>} />
           <Route path="/senders" element={<ProtectedRoute><SendersPage /></ProtectedRoute>} />
+          {/* /settings reuses SendersPage, which now also hosts the Gmail connect card */}
+          <Route path="/settings" element={<ProtectedRoute><SendersPage /></ProtectedRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

@@ -7,6 +7,13 @@ const api = axios.create({
   timeout: 120000,  // 120 seconds for complex queries
 });
 
+// Root API instance - for endpoints NOT under /api (e.g. /google/*)
+const API_ROOT = API_BASE.replace(/\/api\/?$/, '');
+const rootApi = axios.create({
+  baseURL: API_ROOT,
+  timeout: 120000,
+});
+
 // Auth
 export const register = async (data: {
   name: string;
@@ -173,5 +180,43 @@ export const sendSingleEmail = async (toEmail: string, subject: string, body: st
 // Manual - send by specific index
 export const sendManualByIndex = async (index: number, skip = false, subject?: string, body?: string) =>
   api.post('/manual/send-by-index', { index, skip, subject, body });
+
+// ---- Gmail / Google OAuth (Approach B) ----
+
+export interface GmailStatus {
+  connected: boolean;
+  connected_at?: string;
+}
+
+export const getGmailLoginUrl = async (userEmail: string): Promise<string> => {
+  const res = await rootApi.get<{ auth_url: string }>('/google/login', {
+    params: { user_email: userEmail },
+  });
+  return res.data.auth_url;
+};
+
+export const getGmailStatus = async (userEmail: string): Promise<GmailStatus> => {
+  const res = await rootApi.get<GmailStatus>('/google/status', {
+    params: { user_email: userEmail },
+  });
+  return res.data;
+};
+
+export const disconnectGmail = async (userEmail: string) =>
+  rootApi.post('/google/disconnect', { user_email: userEmail });
+
+export const sendGmailEmail = async (payload: {
+  user_email: string;
+  to: string;
+  subject: string;
+  body: string;
+  html?: boolean;
+}) => rootApi.post('/api/gmail/send', payload);
+
+export const sendGmailBulk = async (payload: {
+  user_email: string;
+  subject: string;
+  message_template: string;
+}) => rootApi.post('/api/gmail/send-bulk', payload);
 
 export default api;

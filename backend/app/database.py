@@ -244,11 +244,111 @@ def get_sender_by_id(sender_id):
 
 
 # =========================
+# GMAIL OAUTH TOKENS TABLE
+# =========================
+def create_gmail_tokens_table():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS gmail_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_email TEXT UNIQUE,
+            refresh_token TEXT,
+            access_token TEXT,
+            token_expiry TEXT,
+            connected_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+def save_gmail_token(user_email: str, refresh_token: str, access_token: str = None, token_expiry=None):
+    """Insert or update the stored Gmail OAuth token for a user."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    expiry_str = token_expiry.isoformat() if hasattr(token_expiry, "isoformat") else token_expiry
+
+    cursor.execute("SELECT refresh_token FROM gmail_tokens WHERE user_email = ?", (user_email,))
+    existing = cursor.fetchone()
+
+    if existing:
+        # Google only returns refresh_token on first consent; keep old one if new is empty
+        new_refresh = refresh_token or existing[0]
+        cursor.execute("""
+            UPDATE gmail_tokens
+            SET refresh_token = ?, access_token = ?, token_expiry = ?
+            WHERE user_email = ?
+        """, (new_refresh, access_token, expiry_str, user_email))
+    else:
+        cursor.execute("""
+            INSERT INTO gmail_tokens (user_email, refresh_token, access_token, token_expiry)
+            VALUES (?, ?, ?, ?)
+        """, (user_email, refresh_token, access_token, expiry_str))
+
+    conn.commit()
+    conn.close()
+
+
+def get_gmail_token(user_email: str):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT user_email, refresh_token, access_token, token_expiry, connected_at
+        FROM gmail_tokens WHERE user_email = ?
+    """, (user_email,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if row:
+        return {
+            "user_email": row[0],
+            "refresh_token": row[1],
+            "access_token": row[2],
+            "token_expiry": row[3],
+            "connected_at": row[4],
+        }
+    return None
+
+
+def update_gmail_access_token(user_email: str, access_token: str, token_expiry=None):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    expiry_str = token_expiry.isoformat() if hasattr(token_expiry, "isoformat") else token_expiry
+
+    cursor.execute("""
+        UPDATE gmail_tokens SET access_token = ?, token_expiry = ?
+        WHERE user_email = ?
+    """, (access_token, expiry_str, user_email))
+
+    conn.commit()
+    conn.close()
+
+
+def delete_gmail_token(user_email: str):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM gmail_tokens WHERE user_email = ?", (user_email,))
+    conn.commit()
+    conn.close()
+
+
+def is_gmail_connected(user_email: str) -> bool:
+    return get_gmail_token(user_email) is not None
+
+
+# =========================
 # INIT ALL TABLES
 # =========================
 def setup_database():
     init_db()
     create_senders_table()
+    create_gmail_tokens_table()
 
 
 setup_database()

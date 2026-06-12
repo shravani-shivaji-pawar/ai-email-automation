@@ -4,6 +4,7 @@ import { useAuth } from '../AuthContext';
 import { getSenders, addSender, selectSender } from '../api';
 import type { Sender } from '../types';
 import { motion, AnimatePresence } from 'framer-motion';
+import ConnectGoogleButton from '../components/ConnectGoogleButton';
 
 const SendersPage: React.FC = () => {
   const { user } = useAuth();
@@ -68,57 +69,78 @@ const SendersPage: React.FC = () => {
         ><Plus size={18} /> Add Sender</motion.button>
       </motion.div>
 
-      <AnimatePresence mode="wait">
-        {senders.length === 0 ? (
-          <motion.div key="empty" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}
-            className="glass-card rounded-2xl p-12 text-center"
-          >
-            <div className="w-16 h-16 rounded-2xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center mx-auto mb-4">
-              <Users className="w-8 h-8 text-slate-400" />
-            </div>
-            <p className="text-slate-600 dark:text-slate-400 font-medium">No senders configured yet</p>
-            <p className="text-sm text-slate-400 mt-1">Add your first sender account to start sending emails</p>
-          </motion.div>
-        ) : (
-          <motion.div key="list" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-3">
-            {senders.map((sender, i) => (
-              <motion.div key={sender.id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }}
-                className="glass-card rounded-2xl p-5"
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-4">
-                    <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-500 flex items-center justify-center text-white font-bold text-lg shadow-md">
-                      {sender.name.charAt(0).toUpperCase()}
-                    </div>
-                    <div>
-                      <h3 className="font-semibold text-slate-900 dark:text-white">{sender.name}</h3>
-                      <div className="flex items-center gap-3 mt-1">
-                        <span className="flex items-center gap-1 text-xs text-slate-500">
-                          <Building size={12} />{sender.organization_name}
-                        </span>
-                        <span className="flex items-center gap-1 text-xs text-indigo-500">
-                          <Mail size={12} />{sender.email}
-                        </span>
+      {/* ── Gmail / Google OAuth Connection Card ── */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.1 }}
+        className="mb-8"
+      >
+        <h2 className="text-sm font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">
+          Google Account
+        </h2>
+        <ConnectGoogleButton />
+      </motion.div>
+
+      {/* ── SMTP Senders ── */}
+      <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}>
+        <h2 className="text-sm font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">
+          SMTP Senders
+        </h2>
+
+        <AnimatePresence mode="wait">
+          {senders.length === 0 ? (
+            <motion.div key="empty" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}
+              className="glass-card rounded-2xl p-12 text-center"
+            >
+              <div className="w-16 h-16 rounded-2xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center mx-auto mb-4">
+                <Users className="w-8 h-8 text-slate-400" />
+              </div>
+              <p className="text-slate-600 dark:text-slate-400 font-medium">No senders configured yet</p>
+              <p className="text-sm text-slate-400 mt-1">Add your first sender account to start sending emails</p>
+            </motion.div>
+          ) : (
+            <motion.div key="list" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-3">
+              {senders.map((sender, i) => (
+                <motion.div key={sender.id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }}
+                  className="glass-card rounded-2xl p-5"
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-4">
+                      <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-500 flex items-center justify-center text-white font-bold text-lg shadow-md">
+                        {sender.name.charAt(0).toUpperCase()}
+                      </div>
+                      <div>
+                        <h3 className="font-semibold text-slate-900 dark:text-white">{sender.name}</h3>
+                        <div className="flex items-center gap-3 mt-1">
+                          <span className="flex items-center gap-1 text-xs text-slate-500">
+                            <Building size={12} />{sender.organization_name}
+                          </span>
+                          <span className="flex items-center gap-1 text-xs text-indigo-500">
+                            <Mail size={12} />{sender.email}
+                          </span>
+                        </div>
                       </div>
                     </div>
+                    <div className="flex items-center gap-2">
+                      {activeSender === sender.id && (
+                        <span className="flex items-center gap-1 px-3 py-1.5 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 rounded-lg text-xs font-medium">
+                          <CheckCircle size={12} /> Active
+                        </span>
+                      )}
+                      <button onClick={() => handleSelect(sender.id)}
+                        className="px-4 py-2 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400 rounded-xl text-sm font-medium hover:bg-indigo-200 dark:hover:bg-indigo-900/50 transition-colors"
+                      >Set Active</button>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    {activeSender === sender.id && (
-                      <span className="flex items-center gap-1 px-3 py-1.5 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 rounded-lg text-xs font-medium">
-                        <CheckCircle size={12} /> Active
-                      </span>
-                    )}
-                    <button onClick={() => handleSelect(sender.id)}
-                      className="px-4 py-2 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400 rounded-xl text-sm font-medium hover:bg-indigo-200 dark:hover:bg-indigo-900/50 transition-colors"
-                    >Set Active</button>
-                  </div>
-                </div>
-              </motion.div>
-            ))}
-          </motion.div>
-        )}
-      </AnimatePresence>
+                </motion.div>
+              ))}
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </motion.div>
 
+      {/* ── Add Sender Modal ── */}
       <AnimatePresence>
         {showAdd && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}

@@ -8,7 +8,8 @@ import types as _types
 import uuid
 from typing import Any
 import imaplib
-from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile, Request
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 import hashlib
@@ -121,7 +122,14 @@ from app.database import (
     add_sender,
     get_senders,
     get_sender_by_id,
+    create_gmail_tokens_table,
+    save_gmail_token,
+    get_gmail_token,
+    delete_gmail_token,
+    is_gmail_connected,
 )
+from app.auth_google import get_auth_url, get_flow, fetch_tokens, get_user_info, verify_state
+from app.gmail_service import send_email_gmail
 from app.vector_search import (
     DEFAULT_EMBED_MODEL,
     VectorHit,
@@ -152,7 +160,12 @@ IMAP_SCAN_BUDGET_S = 60  # Increased to allow fetching more emails
 
 init_db()
 create_senders_table()
+create_gmail_tokens_table()
 _DB_CONN = None
+
+# Google OAuth redirect URI (must match Google Cloud Console + frontend env)
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/google/callback")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
 # ════════════════════════════════════════
 # THREAD SAFE SEND STATE
@@ -2009,6 +2022,17 @@ def send_single_email(data: dict):
     if not to_email or not subject or not body:
         raise HTTPException(status_code=400, detail="to_email, subject, and body are required")
     active = state.get("active_sender")
+
+    # Approach B: if the active sender has connected their Gmail account
+    # via OAuth, send through the Gmail API instead of SMTP.
+    if active and is_gmail_connected(active["email"]):
+        try:
+            send_email_gmail(active["email"], to_email, subject, body)
+            print(f"✅ USING GMAIL API for {active['email']}")
+            return {"success": True, "message": f"Email sent to {to_email} via Gmail API"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Gmail send failed: {e}")
+
     if active:
         from app.email_ssl_service import SMTPSettings
         smtp = SMTPSettings(
@@ -2025,6 +2049,7 @@ def send_single_email(data: dict):
         raise HTTPException(status_code=400, detail="No sender configured. Add a sender or set SMTP env vars.")
     try:
         send_email_smtp(to_email, subject, body, smtp)
+        print(f"⚠️ USING SMTP for {active['email']}")
         return {"success": True, "message": f"Email sent to {to_email}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -2085,8 +2110,7 @@ async def root() -> dict[str, object]:
     return {
         "service": "AI Email Automation Agent",
         "docs": "/docs",
-        "status": "running",
-        "frontend": "React"
+        "frontend": "streamlit run streamlit_app.py",
     }
 
 
@@ -2138,9 +2162,7 @@ def enhance_message(data: dict):
     text = data.get("message", "")
     print("\n===== ENHANCED EMAIL =====\n")
     return {"message": enhance_email(text)}
-import os
 
-print("MODEL =", os.getenv("MODEL"))
 
 @app.post("/api/preview")
 async def preview_messages(payload: PreviewRequest) -> dict[str, object]:
@@ -2275,7 +2297,16 @@ def _send_worker_job(job_id: str, subject: str, message_template: str, snapshot:
     attachments = snapshot.get("attachments") or []
     sender_snap = snapshot.get("sender_snapshot")
 
-    if sender_snap:
+    use_gmail_api = False
+    gmail_sender_email = None
+
+    if sender_snap and is_gmail_connected(sender_snap["email"]):
+        use_gmail_api = True
+        gmail_sender_email = sender_snap["email"]
+        smtp = None
+        imap_user = sender_snap["email"]
+        imap_pass = sender_snap.get("password")
+    elif sender_snap:
         from app.email_ssl_service import SMTPSettings
 
         smtp = SMTPSettings(
@@ -2340,7 +2371,25 @@ def _send_worker_job(job_id: str, subject: str, message_template: str, snapshot:
 
         body = personalize_message(message_template, row, first_name_column)
 
-        if smtp:
+        if use_gmail_api:
+            try:
+                send_email_gmail(gmail_sender_email, to_addr, subject, body)
+                entry = {"email": to_addr, "status": "delivered", "detail": "Sent via Gmail API"}
+                with _send_jobs_lock:
+                    p = state["send_jobs"][job_id]["progress"]
+                    p["current_email"] = to_addr
+                    p["delivered"] += 1
+                    p["processed"] += 1
+                    p["results"].append(entry)
+            except Exception as exc:
+                entry = {"email": to_addr, "status": "failed", "detail": str(exc)}
+                with _send_jobs_lock:
+                    p = state["send_jobs"][job_id]["progress"]
+                    p["current_email"] = to_addr
+                    p["failed"] += 1
+                    p["processed"] += 1
+                    p["results"].append(entry)
+        elif smtp:
             try:
                 send_email_smtp(to_addr, subject, body, smtp, attachments)
                 entry = {"email": to_addr, "status": "delivered", "detail": "Accepted by SMTP server"}
@@ -2910,3 +2959,172 @@ def manual_list_all():
     if not sender:
         raise HTTPException(status_code=400, detail="Manual mode not initialized")
     return sender.list_all()
+
+# ════════════════════════════════════════════
+# GOOGLE OAUTH (Gmail API - Approach B)
+# ════════════════════════════════════════════
+
+@app.get("/google/login")
+def google_login(user_email: str):
+    """
+    Step 1: Redirect the logged-in user to Google's consent screen.
+    `user_email` is embedded in a signed, stateless `state` param -
+    no server-side storage needed (works across reloads/workers).
+    """
+    auth_url, _ = get_auth_url(user_email, GOOGLE_REDIRECT_URI)
+    return {"auth_url": auth_url}
+
+
+@app.get("/google/callback")
+def google_callback(request: Request):
+    """
+    Step 2: Google redirects here with `code` and `state`.
+    Exchange the code for tokens and store the refresh token for the user.
+    """
+    code = request.query_params.get("code")
+    oauth_state = request.query_params.get("state")
+    error = request.query_params.get("error")
+
+    if error:
+        return RedirectResponse(f"{FRONTEND_URL}/settings?gmail_connected=0&error={error}")
+
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing authorization code")
+
+    try:
+        user_email = verify_state(oauth_state)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid or expired OAuth state: {e}")
+
+    credentials = fetch_tokens(code, GOOGLE_REDIRECT_URI)
+
+    if not credentials.refresh_token:
+        # Happens if the user already granted consent before and Google
+        # didn't re-issue a refresh_token. save_gmail_token() preserves
+        # the existing one in that case.
+        logger.warning(f"No refresh_token returned for {user_email}; reusing existing if present")
+
+    save_gmail_token(
+        user_email=user_email,
+        refresh_token=credentials.refresh_token,
+        access_token=credentials.token,
+        token_expiry=credentials.expiry,
+    )
+
+    # Redirect back to frontend settings page
+    return RedirectResponse(f"{FRONTEND_URL}/settings?gmail_connected=1")
+
+
+@app.get("/google/status")
+def google_status(user_email: str):
+    """Check whether a user has connected their Gmail account."""
+    token = get_gmail_token(user_email)
+    if not token:
+        return {"connected": False}
+    return {
+        "connected": True,
+        "connected_at": token.get("connected_at"),
+    }
+
+
+@app.post("/google/disconnect")
+def google_disconnect(payload: dict = Body(...)):
+    """Disconnect (remove) a user's stored Gmail tokens."""
+    user_email = payload.get("user_email")
+    if not user_email:
+        raise HTTPException(status_code=400, detail="user_email is required")
+    delete_gmail_token(user_email)
+    return {"success": True}
+
+
+# ════════════════════════════════════════════
+# SEND VIA GMAIL API (Phase 4)
+# ════════════════════════════════════════════
+
+@app.post("/api/gmail/send")
+def gmail_send(payload: dict = Body(...)):
+    """
+    Send a single email via the Gmail API using the sender's connected
+    Google account.
+
+    Body: { "user_email": "...", "to": "...", "subject": "...", "body": "...", "html": false }
+    """
+    user_email = payload.get("user_email")
+    to_email = payload.get("to")
+    subject = payload.get("subject", "")
+    body = payload.get("body", "")
+    html = bool(payload.get("html", False))
+
+    if not user_email or not to_email:
+        raise HTTPException(status_code=400, detail="user_email and to are required")
+
+    if not is_gmail_connected(user_email):
+        raise HTTPException(status_code=400, detail="Gmail account not connected for this user")
+
+    try:
+        result = send_email_gmail(user_email, to_email, subject, body, html=html)
+        return {"success": True, "message_id": result.get("id")}
+    except Exception as e:
+        logger.error(f"Gmail send error: {e}")
+        raise HTTPException(status_code=500, detail=f"Gmail send failed: {e}")
+
+
+@app.post("/api/gmail/send-bulk")
+def gmail_send_bulk(payload: dict = Body(...)):
+    """
+    Send to multiple contacts via Gmail API using stored rows/state
+    (mirrors the SMTP bulk-send flow but routes through Gmail).
+
+    Body: { "user_email": "...", "subject": "...", "message_template": "..." }
+    """
+    user_email = payload.get("user_email")
+    subject = payload.get("subject", "")
+    message_template = payload.get("message_template", "")
+
+    if not user_email:
+        raise HTTPException(status_code=400, detail="user_email is required")
+
+    if not is_gmail_connected(user_email):
+        raise HTTPException(status_code=400, detail="Gmail account not connected for this user")
+
+    rows = state.get("rows", [])
+    email_column = state.get("email_column")
+    first_name_column = state.get("first_name_column")
+
+    if not email_column:
+        raise HTTPException(status_code=400, detail="No email column detected. Upload contacts first.")
+
+    results = []
+    delivered = 0
+    failed = 0
+
+    for row in rows:
+        to_addr = str(row.get(email_column, "")).strip()
+        if not to_addr:
+            continue
+
+        personalized_subject = personalize_message(subject, row, first_name_column) if subject else subject
+        personalized_body = personalize_message(message_template, row, first_name_column)
+
+        try:
+            send_email_gmail(user_email, to_addr, personalized_subject, personalized_body)
+            results.append({"email": to_addr, "status": "delivered", "detail": "Sent via Gmail API"})
+            delivered += 1
+        except Exception as e:
+            results.append({"email": to_addr, "status": "failed", "detail": str(e)})
+            failed += 1
+
+    state["last_batch"] = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "subject": subject,
+        "mode": "gmail_api",
+        "total": len(results),
+        "delivered": delivered,
+        "failed": failed,
+        "skipped": 0,
+        "bounced": 0,
+        "bounced_emails": [],
+        "results": results,
+    }
+
+    return {"success": True, "total": len(results), "delivered": delivered, "failed": failed, "results": results}
