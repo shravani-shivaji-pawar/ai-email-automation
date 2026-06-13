@@ -165,7 +165,7 @@ create_gmail_tokens_table()
 _DB_CONN = None
 
 # Google OAuth redirect URI (must match Google Cloud Console + frontend env)
-GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/google/callback")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "https://ai-email-backend-r2bw.onrender.com")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
 # ════════════════════════════════════════
