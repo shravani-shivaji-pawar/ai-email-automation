@@ -2111,7 +2111,7 @@ async def root() -> dict[str, object]:
     return {
         "service": "AI Email Automation Agent",
         "docs": "/docs",
-        "frontend": "streamlit run streamlit_app.py",
+        "frontend": "React (Vercel)",
     }
 
 
