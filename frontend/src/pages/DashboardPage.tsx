@@ -157,7 +157,14 @@ const DashboardPage: React.FC = () => {
           <h2 className="text-sm font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">
             Gmail Connection
           </h2>
-          <ConnectGoogleButton returnPath="/dashboard" />
+          {user?.email && (
+            <ConnectGoogleButton
+              targetEmail={user.email}
+              title="Your Gmail Account"
+              description="Connect Gmail to send your emails via the Gmail API."
+              returnPath="/dashboard"
+            />
+          )}
         </motion.div>
       )}
 
