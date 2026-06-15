@@ -13,9 +13,11 @@ from google_auth_oauthlib.flow import Flow
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 
-# ✅ FIX: Redirect URI must point to the /google/callback route, not the backend root.
-# Set GOOGLE_REDIRECT_URI in your Render env to:
+# ✅ Redirect URI must point to the /google/callback route, not the backend root.
+# Set GOOGLE_REDIRECT_URI in your Render env to EXACTLY:
 #   https://ai-email-backend-r2bw.onrender.com/google/callback
+# This MUST also be added verbatim under Google Cloud Console ->
+# APIs & Services -> Credentials -> OAuth 2.0 Client IDs -> Authorized redirect URIs.
 GOOGLE_REDIRECT_URI = os.getenv(
     "GOOGLE_REDIRECT_URI",
     "https://ai-email-backend-r2bw.onrender.com/google/callback",
