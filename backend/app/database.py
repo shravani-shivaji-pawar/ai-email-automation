@@ -1,7 +1,11 @@
+import os
 import sqlite3
 import hashlib
 
-DB_NAME = "users.db"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_NAME = os.getenv("DATABASE_URL", os.path.join(BASE_DIR, "users.db"))
+if DB_NAME.startswith("sqlite:///"):
+    DB_NAME = DB_NAME.replace("sqlite:///", "")
 
 SMTP_PROVIDERS = {
     "smtp2go": {"host": "mail.smtp2go.com", "port": 587, "use_tls": True, "user_is_apikey": True},
@@ -209,6 +213,7 @@ def get_senders(user_id):
             "organization_name": r[2],
             "email": r[3],
             "verified": bool(r[4]) if len(r) > 4 else False,
+            "gmail_connected": is_gmail_connected(r[3]),
         }
         for r in rows
     ]
