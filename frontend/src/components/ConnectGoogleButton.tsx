@@ -1,49 +1,74 @@
 import { useEffect, useState, useCallback } from 'react';
 import { getGmailLoginUrl, getGmailStatus, disconnectGmail, type GmailStatus } from '../api';
-import { useAuth } from '../AuthContext';
 
-export default function ConnectGoogleButton() {
-  const { user } = useAuth();
+interface Props {
+  /** The email account to connect/check Gmail for (sender email or logged-in user's email) */
+  targetEmail: string;
+  /** Card heading */
+  title?: string;
+  /** Card description */
+  description?: string;
+  /** Where to redirect after OAuth (defaults to /senders) */
+  returnPath?: string;
+}
+
+export default function ConnectGoogleButton({
+  targetEmail,
+  title = 'Google / Gmail Account',
+  description = 'Connect Gmail to send emails via the Gmail API.',
+  returnPath = '/senders',
+}: Props) {
   const [status, setStatus] = useState<GmailStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refreshStatus = useCallback(async () => {
-    if (!user?.email) return;
+    if (!targetEmail) return;
     try {
-      const s = await getGmailStatus(user.email);
+      const s = await getGmailStatus(targetEmail);
       setStatus(s);
     } catch {
       setError('Could not check Gmail connection status.');
     }
-  }, [user?.email]);
+  }, [targetEmail]);
 
   useEffect(() => {
     refreshStatus();
   }, [refreshStatus]);
 
-  // Handle redirect back from Google: /settings?gmail_connected=1
+  // Handle redirect back from Google: ?gmail_connected=1 / ?gmail_connected=0
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const flag = params.get('gmail_connected');
     if (flag === '1') {
       refreshStatus();
       params.delete('gmail_connected');
-      window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}`);
+      window.history.replaceState(
+        {},
+        '',
+        `${window.location.pathname}${params.toString() ? `?${params}` : ''}`,
+      );
     } else if (flag === '0') {
       setError(params.get('error') || 'Gmail connection failed. Please try again.');
       params.delete('gmail_connected');
       params.delete('error');
-      window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}`);
+      window.history.replaceState(
+        {},
+        '',
+        `${window.location.pathname}${params.toString() ? `?${params}` : ''}`,
+      );
     }
   }, [refreshStatus]);
 
   const handleConnect = async () => {
-    if (!user?.email) return;
+    if (!targetEmail) return;
     setLoading(true);
     setError(null);
     try {
-      const url = await getGmailLoginUrl(user.email);
+      const url = await getGmailLoginUrl(targetEmail);
+      // Stash returnPath so we could use it later if needed (backend currently
+      // redirects to a fixed page, but this keeps the hook for future use).
+      sessionStorage.setItem('gmail_connect_return_path', returnPath);
       window.location.href = url;
     } catch {
       setError('Could not start Google connection.');
@@ -52,11 +77,11 @@ export default function ConnectGoogleButton() {
   };
 
   const handleDisconnect = async () => {
-    if (!user?.email) return;
+    if (!targetEmail) return;
     setLoading(true);
     setError(null);
     try {
-      await disconnectGmail(user.email);
+      await disconnectGmail(targetEmail);
       setStatus({ connected: false });
     } catch {
       setError('Could not disconnect Gmail account.');
@@ -65,56 +90,59 @@ export default function ConnectGoogleButton() {
     }
   };
 
-  if (!user) return null;
+  if (!targetEmail) return null;
 
   return (
     <div className="glass-card rounded-xl p-5 flex flex-col gap-3 max-w-md animate-fade-in">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <div>
-          <h3 className="font-semibold text-text dark:text-dark-text">Google / Gmail Account</h3>
-          <p className="text-sm text-text-secondary dark:text-dark-text-secondary">
-            Connect Gmail to send emails via the Gmail API.
-          </p>
+          <h3 className="font-semibold text-slate-900 dark:text-white">{title}</h3>
+          <p className="text-sm text-slate-500 dark:text-slate-400">{description}</p>
+          <p className="text-xs text-slate-400 mt-1 break-all">{targetEmail}</p>
         </div>
         {status === null ? (
-          <span className="text-xs px-2 py-1 rounded-full bg-surface-alt dark:bg-dark-surface-alt text-text-secondary">
-            Checking...
+          <span className="text-xs px-2 py-1 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-400 shrink-0">
+            Checking…
           </span>
         ) : status.connected ? (
-          <span className="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700 font-medium">
-            Connected
+          <span className="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700 font-medium shrink-0">
+            ✓ Connected
           </span>
         ) : (
-          <span className="text-xs px-2 py-1 rounded-full bg-surface-alt dark:bg-dark-surface-alt text-text-secondary font-medium">
+          <span className="text-xs px-2 py-1 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 font-medium shrink-0">
             Not connected
           </span>
         )}
       </div>
 
       {status?.connected && status.connected_at && (
-        <p className="text-xs text-text-secondary dark:text-dark-text-secondary">
+        <p className="text-xs text-slate-400">
           Connected since {new Date(status.connected_at).toLocaleString()}
         </p>
       )}
 
-      {error && <p className="text-sm text-red-600">{error}</p>}
+      {error && (
+        <p className="text-sm text-red-600 bg-red-50 dark:bg-red-900/20 rounded-lg px-3 py-2">
+          {error}
+        </p>
+      )}
 
       {status?.connected ? (
         <button
           onClick={handleDisconnect}
           disabled={loading}
-          className="px-4 py-2 rounded-md bg-red-50 text-red-700 text-sm font-medium hover:bg-red-100 disabled:opacity-50 transition-colors"
+          className="px-4 py-2 rounded-lg bg-red-50 text-red-700 text-sm font-medium hover:bg-red-100 disabled:opacity-50 transition-colors"
         >
-          {loading ? 'Disconnecting...' : 'Disconnect Gmail Account'}
+          {loading ? 'Disconnecting…' : 'Disconnect Gmail Account'}
         </button>
       ) : (
         <button
           onClick={handleConnect}
           disabled={loading || status === null}
-          className="flex items-center gap-2 px-4 py-2 rounded-md bg-surface dark:bg-dark-surface-alt border border-border dark:border-dark-border text-sm font-medium text-text dark:text-dark-text hover:bg-surface-hover dark:hover:bg-dark-surface-hover disabled:opacity-50 transition-colors"
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 transition-colors shadow-sm"
         >
           <GoogleIcon />
-          {loading ? 'Redirecting...' : 'Connect Google Account'}
+          {loading ? 'Redirecting…' : 'Connect Google Account'}
         </button>
       )}
     </div>

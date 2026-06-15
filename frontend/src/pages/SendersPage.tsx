@@ -69,7 +69,7 @@ const SendersPage: React.FC = () => {
         ><Plus size={18} /> Add Sender</motion.button>
       </motion.div>
 
-      {/* ── Gmail / Google OAuth Connection Card ── */}
+      {/* ── Gmail / Google OAuth Connection Card (for your own login account) ── */}
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -77,16 +77,27 @@ const SendersPage: React.FC = () => {
         className="mb-8"
       >
         <h2 className="text-sm font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">
-          Google Account
+          Your Google Account
         </h2>
-        <ConnectGoogleButton />
+        {user?.email && (
+          <ConnectGoogleButton
+            targetEmail={user.email}
+            title="Your Account"
+            description="Connect your own Gmail to send emails via the Gmail API."
+            returnPath="/senders"
+          />
+        )}
       </motion.div>
 
-      {/* ── SMTP Senders ── */}
+      {/* ── SMTP / Gmail Senders ── */}
       <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}>
         <h2 className="text-sm font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">
-          SMTP Senders
+          Sender Accounts
         </h2>
+        <p className="text-xs text-slate-400 mb-4 -mt-2">
+          Each sender below can connect its own Gmail account. Emails sent from a sender will use
+          its connected Gmail account if available, otherwise its saved app password (SMTP).
+        </p>
 
         <AnimatePresence mode="wait">
           {senders.length === 0 ? (
@@ -103,9 +114,9 @@ const SendersPage: React.FC = () => {
             <motion.div key="list" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-3">
               {senders.map((sender, i) => (
                 <motion.div key={sender.id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }}
-                  className="glass-card rounded-2xl p-5"
+                  className="glass-card rounded-2xl p-5 space-y-4"
                 >
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between flex-wrap gap-3">
                     <div className="flex items-center gap-4">
                       <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-500 flex items-center justify-center text-white font-bold text-lg shadow-md">
                         {sender.name.charAt(0).toUpperCase()}
@@ -133,6 +144,14 @@ const SendersPage: React.FC = () => {
                       >Set Active</button>
                     </div>
                   </div>
+
+                  {/* Per-sender Gmail connect — connects Gmail for THIS sender's email */}
+                  <ConnectGoogleButton
+                    targetEmail={sender.email}
+                    title="Gmail for this sender"
+                    description={`Connect ${sender.email} to send via Gmail API instead of SMTP.`}
+                    returnPath="/senders"
+                  />
                 </motion.div>
               ))}
             </motion.div>
@@ -180,7 +199,9 @@ const SendersPage: React.FC = () => {
                   <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">App Password</label>
                   <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })}
                     className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 dark:text-white outline-none transition-all" required />
-                  <p className="text-xs text-slate-400 mt-1.5">Generate from Google Account → Security → App Passwords</p>
+                  <p className="text-xs text-slate-400 mt-1.5">
+                    Generate from Google Account → Security → App Passwords (used as SMTP fallback if Gmail isn't connected for this sender).
+                  </p>
                 </div>
 
                 <div className="flex gap-3 pt-2">
