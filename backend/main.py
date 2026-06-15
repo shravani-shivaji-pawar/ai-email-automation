@@ -129,7 +129,7 @@ from app.database import (
     is_gmail_connected,
 )
 from app.auth_google import get_auth_url, get_flow, fetch_tokens, get_user_info, verify_state
-from app.gmail_service import send_email_gmail, GmailAuthError
+from app.gmail_service import send_email_gmail
 from app.vector_search import (
     DEFAULT_EMBED_MODEL,
     VectorHit,
@@ -2031,8 +2031,6 @@ def send_single_email(data: dict):
             send_email_gmail(active["email"], to_email, subject, body)
             print(f"✅ USING GMAIL API for {active['email']}")
             return {"success": True, "message": f"Email sent to {to_email} via Gmail API"}
-        except GmailAuthError as e:
-            raise HTTPException(status_code=401, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Gmail send failed: {e}")
 
@@ -2382,14 +2380,6 @@ def _send_worker_job(job_id: str, subject: str, message_template: str, snapshot:
                     p = state["send_jobs"][job_id]["progress"]
                     p["current_email"] = to_addr
                     p["delivered"] += 1
-                    p["processed"] += 1
-                    p["results"].append(entry)
-            except GmailAuthError as exc:
-                entry = {"email": to_addr, "status": "failed", "detail": f"Gmail auth error: {exc}"}
-                with _send_jobs_lock:
-                    p = state["send_jobs"][job_id]["progress"]
-                    p["current_email"] = to_addr
-                    p["failed"] += 1
                     p["processed"] += 1
                     p["results"].append(entry)
             except Exception as exc:
@@ -3075,9 +3065,6 @@ def gmail_send(payload: dict = Body(...)):
     try:
         result = send_email_gmail(user_email, to_email, subject, body, html=html)
         return {"success": True, "message_id": result.get("id")}
-    except GmailAuthError as e:
-        logger.error(f"Gmail auth error: {e}")
-        raise HTTPException(status_code=401, detail=str(e))
     except Exception as e:
         logger.error(f"Gmail send error: {e}")
         raise HTTPException(status_code=500, detail=f"Gmail send failed: {e}")
@@ -3124,9 +3111,6 @@ def gmail_send_bulk(payload: dict = Body(...)):
             send_email_gmail(user_email, to_addr, personalized_subject, personalized_body)
             results.append({"email": to_addr, "status": "delivered", "detail": "Sent via Gmail API"})
             delivered += 1
-        except GmailAuthError as e:
-            results.append({"email": to_addr, "status": "failed", "detail": f"Auth error: {e}"})
-            failed += 1
         except Exception as e:
             results.append({"email": to_addr, "status": "failed", "detail": str(e)})
             failed += 1
