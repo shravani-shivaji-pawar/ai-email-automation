@@ -2,7 +2,12 @@ import { useEffect, useState, useCallback } from 'react';
 import { getGmailLoginUrl, getGmailStatus, disconnectGmail, type GmailStatus } from '../api';
 import { useAuth } from '../AuthContext';
 
-export default function ConnectGoogleButton() {
+interface Props {
+  /** Where to redirect after OAuth (defaults to /settings) */
+  returnPath?: string;
+}
+
+export default function ConnectGoogleButton({ returnPath = '/settings' }: Props) {
   const { user } = useAuth();
   const [status, setStatus] = useState<GmailStatus | null>(null);
   const [loading, setLoading] = useState(false);
@@ -22,19 +27,27 @@ export default function ConnectGoogleButton() {
     refreshStatus();
   }, [refreshStatus]);
 
-  // Handle redirect back from Google: /settings?gmail_connected=1
+  // Handle redirect back from Google: /settings?gmail_connected=1  or  /dashboard?gmail_connected=1
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const flag = params.get('gmail_connected');
     if (flag === '1') {
       refreshStatus();
       params.delete('gmail_connected');
-      window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}`);
+      window.history.replaceState(
+        {},
+        '',
+        `${window.location.pathname}${params.toString() ? `?${params}` : ''}`,
+      );
     } else if (flag === '0') {
       setError(params.get('error') || 'Gmail connection failed. Please try again.');
       params.delete('gmail_connected');
       params.delete('error');
-      window.history.replaceState({}, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}`);
+      window.history.replaceState(
+        {},
+        '',
+        `${window.location.pathname}${params.toString() ? `?${params}` : ''}`,
+      );
     }
   }, [refreshStatus]);
 
@@ -71,50 +84,54 @@ export default function ConnectGoogleButton() {
     <div className="glass-card rounded-xl p-5 flex flex-col gap-3 max-w-md animate-fade-in">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="font-semibold text-text dark:text-dark-text">Google / Gmail Account</h3>
-          <p className="text-sm text-text-secondary dark:text-dark-text-secondary">
+          <h3 className="font-semibold text-slate-900 dark:text-white">Google / Gmail Account</h3>
+          <p className="text-sm text-slate-500 dark:text-slate-400">
             Connect Gmail to send emails via the Gmail API.
           </p>
         </div>
         {status === null ? (
-          <span className="text-xs px-2 py-1 rounded-full bg-surface-alt dark:bg-dark-surface-alt text-text-secondary">
-            Checking...
+          <span className="text-xs px-2 py-1 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-400">
+            Checking…
           </span>
         ) : status.connected ? (
           <span className="text-xs px-2 py-1 rounded-full bg-green-100 text-green-700 font-medium">
-            Connected
+            ✓ Connected
           </span>
         ) : (
-          <span className="text-xs px-2 py-1 rounded-full bg-surface-alt dark:bg-dark-surface-alt text-text-secondary font-medium">
+          <span className="text-xs px-2 py-1 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 font-medium">
             Not connected
           </span>
         )}
       </div>
 
       {status?.connected && status.connected_at && (
-        <p className="text-xs text-text-secondary dark:text-dark-text-secondary">
+        <p className="text-xs text-slate-400">
           Connected since {new Date(status.connected_at).toLocaleString()}
         </p>
       )}
 
-      {error && <p className="text-sm text-red-600">{error}</p>}
+      {error && (
+        <p className="text-sm text-red-600 bg-red-50 dark:bg-red-900/20 rounded-lg px-3 py-2">
+          {error}
+        </p>
+      )}
 
       {status?.connected ? (
         <button
           onClick={handleDisconnect}
           disabled={loading}
-          className="px-4 py-2 rounded-md bg-red-50 text-red-700 text-sm font-medium hover:bg-red-100 disabled:opacity-50 transition-colors"
+          className="px-4 py-2 rounded-lg bg-red-50 text-red-700 text-sm font-medium hover:bg-red-100 disabled:opacity-50 transition-colors"
         >
-          {loading ? 'Disconnecting...' : 'Disconnect Gmail Account'}
+          {loading ? 'Disconnecting…' : 'Disconnect Gmail Account'}
         </button>
       ) : (
         <button
           onClick={handleConnect}
           disabled={loading || status === null}
-          className="flex items-center gap-2 px-4 py-2 rounded-md bg-surface dark:bg-dark-surface-alt border border-border dark:border-dark-border text-sm font-medium text-text dark:text-dark-text hover:bg-surface-hover dark:hover:bg-dark-surface-hover disabled:opacity-50 transition-colors"
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 transition-colors shadow-sm"
         >
           <GoogleIcon />
-          {loading ? 'Redirecting...' : 'Connect Google Account'}
+          {loading ? 'Redirecting…' : 'Connect Google Account'}
         </button>
       )}
     </div>
