@@ -1,5 +1,5 @@
 """
-Google OAuth2 helper for Gmail API integration - stateless.
+Google OAuth2 helper for Gmail API integration (Approach B) - stateless.
 """
 
 import os
@@ -12,16 +12,7 @@ from google_auth_oauthlib.flow import Flow
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-
-# ✅ Redirect URI must point to the /google/callback route, not the backend root.
-# Set GOOGLE_REDIRECT_URI in your Render env to EXACTLY:
-#   https://ai-email-backend-r2bw.onrender.com/google/callback
-# This MUST also be added verbatim under Google Cloud Console ->
-# APIs & Services -> Credentials -> OAuth 2.0 Client IDs -> Authorized redirect URIs.
-GOOGLE_REDIRECT_URI = os.getenv(
-    "GOOGLE_REDIRECT_URI",
-    "https://ai-email-backend-r2bw.onrender.com/google/callback",
-)
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "https://ai-email-backend-r2bw.onrender.com")
 
 # Secret used to sign the OAuth `state` param (set a strong random value in prod)
 STATE_SECRET = os.getenv("OAUTH_STATE_SECRET", "dev-insecure-change-me")
