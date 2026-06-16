@@ -11,12 +11,15 @@ import {
   sendSingleEmail, sendManualByIndex, listManual
 } from '../api';
 import SendProgress from '../components/SendProgress';
+import ConnectGoogleButton from '../components/ConnectGoogleButton';
+import { useAuth } from '../AuthContext';
 import type { SendStatusResponse, ExcelUploadResponse, PreviewItem } from '../types';
 import { motion, AnimatePresence } from 'framer-motion';
 
 type Tab = 'bulk' | 'quick';
 
 const SendEmailsPage: React.FC = () => {
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<Tab>('bulk');
   const [activeStep, setActiveStep] = useState(0);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
@@ -232,6 +235,24 @@ const SendEmailsPage: React.FC = () => {
           </div>
         </div>
       </motion.div>
+
+      {/* Gmail Connect Card — individual users can connect their own Gmail
+          to send via the Gmail API (same mechanism organizations use per-sender) */}
+      {user?.role === 'individual' && user?.email && (
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.05 }}
+          className="mb-6"
+        >
+          <ConnectGoogleButton
+            targetEmail={user.email}
+            title="Your Gmail Account"
+            description="Connect Gmail to send your emails via the Gmail API (recommended over app password)."
+            returnPath="/send-emails"
+          />
+        </motion.div>
+      )}
 
       {/* Sender Warning Banner */}
       {!activeSender && (
