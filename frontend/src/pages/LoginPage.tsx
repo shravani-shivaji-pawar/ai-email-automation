@@ -5,6 +5,30 @@ import { useTheme } from '../contexts/ThemeContext';
 import { Mail, Lock, Eye, EyeOff, Sparkles, Moon, Sun } from 'lucide-react';
 import { motion } from 'framer-motion';
 
+// ── ORGANIZATIONAL DOMAIN HINT (login page only) ────────────────────────────
+// This set is used solely to show a proactive hint beneath the email field
+// if an organizational-looking email is entered with a personal domain.
+// It does NOT block login — the backend enforces that. Individual accounts,
+// Gmail OAuth sender connections, and email-sending flows are unaffected.
+const PERSONAL_EMAIL_DOMAINS_LOGIN = new Set([
+  "gmail.com", "yahoo.com", "yahoo.co.in", "yahoo.co.uk",
+  "outlook.com", "hotmail.com", "hotmail.co.uk", "hotmail.in",
+  "icloud.com", "me.com", "mac.com",
+  "proton.me", "protonmail.com", "protonmail.ch",
+  "live.com", "live.in", "live.co.uk",
+  "aol.com", "ymail.com", "rocketmail.com",
+  "msn.com", "rediffmail.com",
+  "mail.com", "gmx.com", "gmx.net",
+  "tutanota.com", "fastmail.com",
+]);
+
+function isPersonalDomainLogin(email: string): boolean {
+  const parts = email.trim().toLowerCase().split("@");
+  if (parts.length !== 2 || !parts[1]) return false;
+  return PERSONAL_EMAIL_DOMAINS_LOGIN.has(parts[1]);
+}
+// ────────────────────────────────────────────────────────────────────────────
+
 const LoginPage: React.FC = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -111,6 +135,18 @@ const LoginPage: React.FC = () => {
                   required
                 />
               </div>
+              {/* ── Organizational domain hint ─────────────────────────────
+                  Shown only when the typed email is a personal/consumer
+                  domain.  This is a UX hint, not a hard block — the backend
+                  enforces the actual policy for organizational accounts.
+                  Individual accounts are completely unaffected. */}
+              {email && isPersonalDomainLogin(email) && (
+                <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
+                  ⚠️ Organizational accounts require a company email address.
+                  Personal providers (Gmail, Outlook, Yahoo, etc.) are not
+                  permitted for organization login.
+                </p>
+              )}
             </div>
 
             <div>

@@ -27,9 +27,41 @@ const AiAgentPage: React.FC = () => {
   const [semanticQuery, setSemanticQuery] = useState('');
   const [semanticHits, setSemanticHits] = useState<any[]>([]);
   const [searching, setSearching] = useState(false);
-  const [specificUid, setSpecificUid] = useState('');
+  const [specificEmailNumber, setSpecificEmailNumber] = useState('');
+  // emailNumberMap mirrors state["email_number_map"] on the server.
+  // It is populated whenever the AI returns a numbered list, OR whenever
+  // the sidebar inbox list / sidebar search results are (re)rendered, so the
+  // sidebar can resolve display numbers to UIDs for the Open/Run Action
+  // buttons without exposing raw UIDs in the UI.
+  const emailNumberMapRef = useRef<Record<number, string>>({});
+  // Mirrors emailNumberMapRef into render state purely so the UI (disabled
+  // buttons, placeholders) can react to it — the ref above remains the
+  // source of truth read by the handlers.
+  const [mapReady, setMapReady] = useState(false);
+  const [highlightedEmailUid, setHighlightedEmailUid] = useState<string | null>(null);
   const [selectedAction, setSelectedAction] = useState('mark_read');
   const [actionLoading, setActionLoading] = useState(false);
+  const [openLoading, setOpenLoading] = useState(false);
+  const [sidebarSearching, setSidebarSearching] = useState(false);
+  const [sidebarError, setSidebarError] = useState('');
+  const [sidebarToast, setSidebarToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  // Single source of truth for turning a rendered email list into the
+  // display-number → UID map. Called on inbox load, inbox refresh, and
+  // sidebar search — i.e. anywhere the visible list is (re)rendered.
+  const buildEmailNumberMap = (list: EmailSnippet[]) => {
+    const newMap: Record<number, string> = {};
+    list.forEach((e, i) => {
+      if (e.uid) newMap[i + 1] = e.uid;
+    });
+    emailNumberMapRef.current = newMap;
+    setMapReady(Object.keys(newMap).length > 0);
+  };
+
+  const showSidebarToast = (type: 'success' | 'error', message: string) => {
+    setSidebarToast({ type, message });
+    setTimeout(() => setSidebarToast(null), 3500);
+  };
   const [promptScanUnlimited] = useState(false);
   const [promptScanMax, setPromptScanMax] = useState(200);
   const [showHistory, setShowHistory] = useState(false);
@@ -54,7 +86,11 @@ const AiAgentPage: React.FC = () => {
   const loadRecentEmails = async () => {
     try {
       const res = await getRecentEmails(500);
-      setEmails(res.data.emails || []);
+      const list: EmailSnippet[] = res.data.emails || [];
+      setEmails(list);
+      // Inbox (re)load is one of the two allowed reset points for the
+      // sidebar number→UID map (the other is an explicit sidebar search).
+      buildEmailNumberMap(list);
     } catch (e) { console.error(e); }
   };
 
@@ -117,25 +153,126 @@ const AiAgentPage: React.FC = () => {
     } catch (e) { console.error(e); } finally { setSearching(false); }
   };
 
-  const handleFetchFullEmail = async (uid: string) => {
+  // handleFetchFullEmail is still called internally by inbox-panel clicks
+  // (which have access to the email object with uid).  UIDs are NEVER shown
+  // to the user — we show the subject or a generic label instead.
+  const handleFetchFullEmail = async (uid: string, displayLabel?: string) => {
     try {
       const res = await getEmailByUid(uid);
       if (res.data.body) {
         setSelectedEmail({ uid, body: res.data.body });
-        addAssistantMessage(`📧 Fetched full email for UID ${uid}`);
+        // Show subject or display label — never the raw UID
+        const label = displayLabel || 'the selected email';
+        addAssistantMessage(`📧 Opened ${label}`);
       }
     } catch (e) { console.error(e); }
   };
 
+  // handleFetchByNumber: sidebar "Open" button — takes a display number
+  // typed by the user, looks it up in emailNumberMapRef, fetches full email.
+  // Does NOT reset emailNumberMapRef — per the state-reset rule, the map is
+  // only rebuilt on a new search or an inbox refresh, never on open/action.
+  const handleFetchByNumber = async () => {
+    const numStr = specificEmailNumber.trim();
+    const num = parseInt(numStr, 10);
+    if (!numStr || isNaN(num)) {
+      setSidebarError('Please enter a valid email number (e.g. 2).');
+      return;
+    }
+    if (!mapReady || Object.keys(emailNumberMapRef.current).length === 0) {
+      setSidebarError('Please run Search or open Inbox first.');
+      return;
+    }
+    const uid = emailNumberMapRef.current[num];
+    if (!uid) {
+      setSidebarError('Invalid selection. Run search or refresh inbox.');
+      return;
+    }
+    setSidebarError('');
+    setOpenLoading(true);
+    try {
+      setHighlightedEmailUid(uid);
+      await handleFetchFullEmail(uid, `email ${num}`);
+      showSidebarToast('success', `Opened email ${num}`);
+    } catch (e) {
+      console.error(e);
+      showSidebarToast('error', 'Failed to open email.');
+    } finally {
+      setOpenLoading(false);
+    }
+  };
+
   const handleAction = async () => {
-    const uid = specificUid.trim();
-    if (!uid) { addAssistantMessage('Please enter a UID to apply action'); return; }
+    const numStr = specificEmailNumber.trim();
+    if (!numStr) {
+      setSidebarError('Please enter an email number to apply action.');
+      return;
+    }
+    const num = parseInt(numStr, 10);
+    if (isNaN(num)) {
+      setSidebarError('Please enter a valid email number (e.g. 2).');
+      return;
+    }
+    if (!mapReady || Object.keys(emailNumberMapRef.current).length === 0) {
+      setSidebarError('Please run Search or open Inbox first.');
+      return;
+    }
+    // Resolve display number → internal UID (never shown to user)
+    const uid = emailNumberMapRef.current[num];
+    if (!uid) {
+      setSidebarError('Invalid selection. Run search or refresh inbox.');
+      return;
+    }
+    setSidebarError('');
     setActionLoading(true);
     try {
+      setHighlightedEmailUid(uid);
       const res = await emailAction(selectedAction, uid);
-      addAssistantMessage(`✅ ${res.data.message || 'Action completed for UID ' + uid}`);
+      // Confirm success by email number, not UID
+      showSidebarToast('success', res.data.message || 'Action completed successfully');
+      addAssistantMessage(`✅ ${res.data.message || `Action applied to email ${num}`}`);
+      // Refresh the inbox list (this is an allowed reset point) but do NOT
+      // reset the map as a side-effect of running the action itself.
       await loadRecentEmails();
-    } catch (e) { console.error(e); } finally { setActionLoading(false); }
+    } catch (e) {
+      console.error(e);
+      showSidebarToast('error', 'Action failed. Please try again.');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // handleSidebarSearch: sidebar "Search" button (Inbox panel). Calls the
+  // EXISTING backend search API unchanged, renders the results, assigns
+  // display index numbers (1, 2, 3...), and rebuilds sidebarEmailMap.
+  // This is one of the two allowed reset points for the map (the other is
+  // an inbox refresh) — it is NOT reset on Open or Run Action.
+  const handleSidebarSearch = async () => {
+    if (!searchQuery.trim()) return;
+    setSidebarSearching(true);
+    setSidebarError('');
+    try {
+      const res = await searchEmails(searchQuery, 20);
+      const found: EmailSnippet[] = (res.data.hits || []).map((h: any) => ({
+        uid: h.uid,
+        date: h.meta?.date || '',
+        from: h.meta?.from || '',
+        subject: h.meta?.subject || '(No subject)',
+        body: '',
+        seen: h.meta?.seen || false,
+      }));
+      setEmails(found);
+      buildEmailNumberMap(found);
+      setHighlightedEmailUid(null);
+      if (found.length === 0) {
+        showSidebarToast('error', 'No emails found for that search.');
+      }
+    } catch (e) {
+      console.error(e);
+      showSidebarToast('error', 'Search failed. Please try again.');
+    } finally {
+      setSidebarSearching(false);
+    }
   };
 
   const addAssistantMessage = (content: string, emails?: EmailSnippet[]) => {
@@ -163,26 +300,29 @@ const AiAgentPage: React.FC = () => {
     setLoading(true);
 
     try {
-      const lowerMsg = userMessage.toLowerCase();
-      if (lowerMsg.includes('open') || lowerMsg.includes('read') || lowerMsg.includes('show email')) {
-        const uidMatch = userMessage.match(/uid[:\s]*(\d+)/i) || userMessage.match(/email\s*(\d+)/i);
-        if (uidMatch) {
-          const res = await getEmailByUid(uidMatch[1]);
-          const body = res.data.body || 'No content';
-          setMessages(prev => [...prev, { role: 'assistant', content: `Email UID ${uidMatch[1]}:\n\n${body}` }]);
-          setMessageEmails(prev => [...prev, undefined]);
-          setSelectedEmail({ uid: uidMatch[1], body });
-          setLoading(false);
-          return;
-        }
-      }
-
+      // ── All natural-language email references (numbers, sender names,
+      //    "latest", subject keywords) are now resolved server-side.
+      //    The frontend no longer parses raw UIDs from user text.
+      //    The legacy getEmailByUid() call below is kept for the sidebar
+      //    "Fetch" button which still takes a display-email number entered
+      //    by the user in the sidebar panel — see handleFetchByNumber().
       const maxEmails = promptScanUnlimited ? 0 : promptScanMax;
       const res = await queryEmailInsights(userMessage, maxEmails, true);
       const answer = res.data.answer || 'No response';
       const returnedEmails: EmailSnippet[] = res.data.emails || [];
       setMessages(prev => [...prev, { role: 'assistant', content: answer }]);
       setMessageEmails(prev => [...prev, returnedEmails.length > 0 ? returnedEmails : undefined]);
+
+      // ── Mirror the server-side email_number_map on the client ────────────
+      // When the server returns a numbered email list, it also stores the
+      // display-number → UID mapping in state["email_number_map"].
+      // We rebuild an equivalent map on the client from the returned emails[]
+      // array so that sidebar Open/Action buttons can resolve numbers to UIDs
+      // without a separate API round-trip.
+      if (returnedEmails.length > 0) {
+        buildEmailNumberMap(returnedEmails);
+      }
+      // ────────────────────────────────────────────────────────────────────
 
       try { await addChatTurn(user.id, 'user', userMessage); await addChatTurn(user.id, 'assistant', answer); } catch (e) {}
 
@@ -230,7 +370,7 @@ const AiAgentPage: React.FC = () => {
                   <Bot className="w-10 h-10 text-indigo-500" />
                 </div>
                 <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-300 mb-2">Welcome to Email Assistant</h3>
-                <p className="text-sm text-slate-500 dark:text-slate-400 max-w-md">Ask me to list emails, summarize your inbox, or perform actions like "mark email 123 as read"</p>
+                <p className="text-sm text-slate-500 dark:text-slate-400 max-w-md">Ask me to list emails, summarize your inbox, or perform actions — e.g. "Move email 2 to spam" or "Archive the Google email"</p>
               </motion.div>
             )}
           </AnimatePresence>
@@ -377,9 +517,11 @@ const AiAgentPage: React.FC = () => {
             {semanticHits.length > 0 && (
               <div className="space-y-1 max-h-32 overflow-y-auto">
                 {semanticHits.map((hit, idx) => (
-                  <div key={idx} onClick={() => { setSpecificUid(hit.uid); handleFetchFullEmail(hit.uid); }}
+                  <div key={idx} onClick={() => { handleFetchFullEmail(hit.uid, (hit.meta?.subject || 'email').substring(0, 40)); }}
                     className="px-2 py-1.5 text-xs bg-slate-50 dark:bg-slate-700 rounded-lg cursor-pointer hover:bg-purple-50 dark:hover:bg-purple-900/20 transition-colors"
-                  >UID {hit.uid} | {((hit.meta?.subject) || '(no subject)').substring(0, 30)}</div>
+                  >
+                    📌 {((hit.meta?.subject) || '(no subject)').substring(0, 35)}
+                  </div>
                 ))}
               </div>
             )}
@@ -394,21 +536,64 @@ const AiAgentPage: React.FC = () => {
             </div>
           </div>
           <div className="p-3 space-y-3">
+            {/* Email number input — users type 1, 2, 3 (the numbers shown
+                 in the inbox list / chat list), never raw UIDs */}
             <div className="flex gap-2">
-              <input type="text" value={specificUid} onChange={(e) => setSpecificUid(e.target.value)}
-                placeholder="Enter UID" className="flex-1 px-3 py-2 text-sm border rounded-lg dark:bg-slate-700 dark:border-slate-600 outline-none" />
-              <button onClick={() => specificUid && handleFetchFullEmail(specificUid)}
-                className="px-3 py-2 text-xs bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 transition-colors shrink-0">Fetch</button>
+              <div className="flex-1 relative">
+                <input
+                  type="number"
+                  min={1}
+                  max={999}
+                  value={specificEmailNumber}
+                  onChange={(e) => { setSpecificEmailNumber(e.target.value); setSidebarError(''); }}
+                  placeholder={mapReady ? 'Email number (e.g. 2)' : 'Enter email number from list'}
+                  disabled={!mapReady}
+                  className="w-full px-3 py-2 text-sm border rounded-lg dark:bg-slate-700 dark:border-slate-600 outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                />
+              </div>
+              <button
+                onClick={handleFetchByNumber}
+                disabled={!mapReady || openLoading || !specificEmailNumber.trim()}
+                className="px-3 py-2 text-xs bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0 flex items-center gap-1.5"
+              >
+                {openLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+                Open
+              </button>
             </div>
+            {sidebarError ? (
+              <p className="text-[10px] text-rose-500 -mt-1">⚠️ {sidebarError}</p>
+            ) : (
+              <p className="text-[10px] text-slate-400 -mt-1">
+                💡 Use the number shown in the inbox list
+              </p>
+            )}
             <select value={selectedAction} onChange={(e) => setSelectedAction(e.target.value)}
               className="w-full px-3 py-2 text-sm border rounded-lg dark:bg-slate-700 dark:border-slate-600 outline-none">
               {actions.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}
             </select>
-            <button onClick={handleAction} disabled={actionLoading || !specificUid.trim()}
-              className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-lg hover:from-amber-600 hover:to-orange-600 disabled:opacity-50 transition-all"
+            <button onClick={handleAction} disabled={!mapReady || actionLoading || !specificEmailNumber.trim()}
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-lg hover:from-amber-600 hover:to-orange-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
             >{actionLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />} Run Action</button>
           </div>
         </div>
+
+        {/* Toast notifications for sidebar Open/Action feedback */}
+        <AnimatePresence>
+          {sidebarToast && (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              className={`rounded-xl px-3 py-2 text-xs font-medium flex items-center gap-2 ${
+                sidebarToast.type === 'success'
+                  ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400'
+                  : 'bg-rose-100 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400'
+              }`}
+            >
+              {sidebarToast.message}
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         <div className="glass-card rounded-2xl overflow-hidden">
           <div className="p-3 border-b border-slate-200/50 dark:border-slate-700/50 bg-gradient-to-r from-rose-50 to-pink-50 dark:from-rose-900/20 dark:to-pink-900/20">
@@ -417,7 +602,17 @@ const AiAgentPage: React.FC = () => {
                 <Mail className="w-4 h-4 text-rose-500" />
                 <span className="font-semibold text-sm text-slate-800 dark:text-slate-200">Inbox ({emails.length})</span>
               </div>
-              <button onClick={async () => { setDeepScanning(true); try { const res = await getRecentEmails(500, true); setEmails(res.data.emails || []); } catch (e) { console.error(e); } finally { setDeepScanning(false); } }}
+              <button onClick={async () => {
+                setDeepScanning(true);
+                try {
+                  const res = await getRecentEmails(500, true);
+                  const list: EmailSnippet[] = res.data.emails || [];
+                  setEmails(list);
+                  // Inbox refresh is an allowed reset point for the map.
+                  buildEmailNumberMap(list);
+                  setHighlightedEmailUid(null);
+                } catch (e) { console.error(e); } finally { setDeepScanning(false); }
+              }}
                 className="p-1.5 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors">
                 <RefreshCw size={14} className={deepScanning ? 'animate-spin' : ''} />
               </button>
@@ -427,17 +622,29 @@ const AiAgentPage: React.FC = () => {
             <div className="flex gap-2">
               <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search emails..." className="flex-1 px-3 py-2 text-xs border rounded-lg dark:bg-slate-700 dark:border-slate-600 outline-none"
-                onKeyDown={async (e) => { if (e.key === 'Enter') { const res = await searchEmails(searchQuery, 20); const found = (res.data.hits || []).map((h: any) => ({ uid: h.uid, date: h.meta?.date || '', from: h.meta?.from || '', subject: h.meta?.subject || '(No subject)', body: '', seen: h.meta?.seen || false })); setEmails(found); } }} />
-              <button className="p-2 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 transition-colors"><Search size={14} /></button>
+                onKeyDown={async (e) => { if (e.key === 'Enter') await handleSidebarSearch(); }} />
+              <button onClick={handleSidebarSearch} disabled={sidebarSearching || !searchQuery.trim()}
+                className="p-2 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+                {sidebarSearching ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
+              </button>
             </div>
           </div>
           <div className="max-h-80 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-700/50">
-            {emails.map((email) => (
-              <div key={email.uid} onClick={() => { setSelectedEmail({ uid: email.uid, body: email.body }); handleFetchFullEmail(email.uid); }}
-                className="p-3 cursor-pointer hover:bg-purple-50 dark:hover:bg-purple-900/20 transition-colors">
+            {emails.map((email, i) => (
+              <div key={email.uid} onClick={() => { setSelectedEmail({ uid: email.uid, body: email.body }); setHighlightedEmailUid(email.uid); handleFetchFullEmail(email.uid); }}
+                className={`p-3 cursor-pointer transition-colors ${
+                  highlightedEmailUid === email.uid
+                    ? 'bg-indigo-50 dark:bg-indigo-900/30 border-l-2 border-indigo-500'
+                    : 'hover:bg-purple-50 dark:hover:bg-purple-900/20'
+                }`}>
                 <div className="flex items-center justify-between mb-1">
-                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${email.seen ? 'bg-slate-200 dark:bg-slate-700 text-slate-500' : 'bg-indigo-500 text-white'}`}>
-                    {email.seen ? 'Read' : 'New'}
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-[10px] w-5 h-5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 font-semibold flex items-center justify-center shrink-0">
+                      {i + 1}
+                    </span>
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${email.seen ? 'bg-slate-200 dark:bg-slate-700 text-slate-500' : 'bg-indigo-500 text-white'}`}>
+                      {email.seen ? 'Read' : 'New'}
+                    </span>
                   </span>
                   <span className="text-[10px] text-slate-400">{email.date?.split('T')[0]}</span>
                 </div>
@@ -454,7 +661,10 @@ const AiAgentPage: React.FC = () => {
               className="glass-card rounded-2xl overflow-hidden">
               <div className="p-3 border-b border-slate-200/50 dark:border-slate-700/50 bg-gradient-to-r from-cyan-50 to-blue-50 dark:from-cyan-900/20 dark:to-blue-900/20">
                 <div className="flex items-center justify-between">
-                  <span className="font-semibold text-sm text-slate-800 dark:text-slate-200">UID: {selectedEmail.uid}</span>
+                  <span className="font-semibold text-sm text-slate-800 dark:text-slate-200">
+                    {/* Show subject from inbox list if available; never expose raw UID */}
+                    {emails.find(e => e.uid === selectedEmail.uid)?.subject || 'Selected Email'}
+                  </span>
                   <button onClick={() => setSelectedEmail(null)}
                     className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors"><X size={14} /></button>
                 </div>

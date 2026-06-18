@@ -1,7 +1,18 @@
 import os
 import sqlite3
 import hashlib
+import logging
 from contextlib import contextmanager
+
+# TEMP DIAGNOSTIC LOGGING — sender persistence investigation.
+# Safe to remove once the root cause is confirmed and fixed; purely
+# observational, no behavior change.
+logger = logging.getLogger("sender_diagnostics")
+if not logger.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("[SENDER-DIAG] %(asctime)s %(message)s"))
+    logger.addHandler(_h)
+logger.setLevel(logging.INFO)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_NAME = os.getenv("DATABASE_URL", os.path.join(BASE_DIR, "users.db"))
@@ -86,20 +97,33 @@ def init_db():
         cols = [row[1] for row in cursor.fetchall()]
         if "app_password" not in cols:
             cursor.execute("ALTER TABLE users ADD COLUMN app_password TEXT")
+        # ── ORG DOMAIN MIGRATION ──────────────────────────────────────────
+        # New "domain" column stores the extracted email domain (e.g.
+        # "company.com") for organizational accounts. NULL for individual
+        # accounts. Existing rows are unaffected by this migration; the
+        # column is simply added with no data loss.
+        if "domain" not in cols:
+            cursor.execute("ALTER TABLE users ADD COLUMN domain TEXT")
 
 
 # =========================
 # CREATE USER
 # =========================
-def create_user(name, email, phone, password, role, app_password=None):
+def create_user(name, email, phone, password, role, app_password=None, domain=None):
+    """
+    domain: extracted organizational email domain (e.g. "company.com").
+    Only meaningful for role == "organization"; pass None for individual
+    accounts. This is purely additive — every existing caller that omits
+    `domain` keeps working exactly as before.
+    """
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             hashed_password = hash_password(password)
             cursor.execute("""
-                INSERT INTO users (name, email, phone, password, role, app_password)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (name, email, phone, hashed_password, role, app_password or None))
+                INSERT INTO users (name, email, phone, password, role, app_password, domain)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (name, email, phone, hashed_password, role, app_password or None, domain or None))
         return True
     except Exception as e:
         print("DB ERROR:", e)
@@ -136,8 +160,29 @@ def get_user_by_email(email):
             "password": row[4],
             "role": row[5],
             "app_password": row[6] if len(row) > 6 else None,
+            "domain": row[7] if len(row) > 7 else None,
         }
     return None
+
+
+# =========================
+# UPDATE USER'S STORED DOMAIN (ORGANIZATIONAL ACCOUNTS)
+# =========================
+def update_user_domain(email, domain):
+    """
+    Updates ONLY the `domain` column for an existing user, identified by
+    email. Called on successful organizational login to:
+      - backfill the domain for accounts created before this column existed
+      - keep the stored domain in sync with the account's email
+    All other user fields (name, phone, password, role, app_password) are
+    left completely untouched.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET domain = ? WHERE email = ?",
+            (domain, email),
+        )
 
 
 # =========================
@@ -178,6 +223,13 @@ def add_sender(user_id, name, org_name, email, password, smtp_host=None, smtp_po
             INSERT INTO senders (user_id, name, organization_name, email, password, smtp_host, smtp_port, smtp_use_tls, smtp2go_api_key, verified)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (user_id, name, org_name, email, password, smtp_host, smtp_port, smtp_use_tls, smtp2go_api_key, verified))
+        new_id = cursor.lastrowid
+    # TEMP DIAGNOSTIC LOGGING — confirms the exact file the row was written
+    # to and the row id SQLite assigned, immediately after commit.
+    logger.info(
+        "add_sender: inserted sender_id=%s user_id=%s email=%s into db_path=%s",
+        new_id, user_id, email, os.path.abspath(DB_NAME),
+    )
 
 
 # =========================
@@ -191,6 +243,17 @@ def get_senders(user_id):
             FROM senders WHERE user_id = ?
         """, (user_id,))
         rows = cursor.fetchall()
+
+    # TEMP DIAGNOSTIC LOGGING — every time the sender list is read, log how
+    # many rows came back and from which physical db file. If this count
+    # drops to 0 for a user_id that previously had rows, compare the
+    # db_path printed here against the one printed by add_sender for the
+    # same account — if they differ, that's a path-mismatch bug; if they
+    # match, the row was genuinely deleted (or the file was reset).
+    logger.info(
+        "get_senders: user_id=%s returned %d row(s) from db_path=%s",
+        user_id, len(rows), os.path.abspath(DB_NAME),
+    )
 
     return [
         {
@@ -264,11 +327,19 @@ def save_gmail_token(user_email: str, refresh_token: str, access_token: str = No
                 SET refresh_token = ?, access_token = ?, token_expiry = ?
                 WHERE user_email = ?
             """, (new_refresh, access_token, expiry_str, user_email))
+            logger.info(
+                "save_gmail_token: UPDATED existing token for %s in db_path=%s",
+                user_email, os.path.abspath(DB_NAME),
+            )
         else:
             cursor.execute("""
                 INSERT INTO gmail_tokens (user_email, refresh_token, access_token, token_expiry)
                 VALUES (?, ?, ?, ?)
             """, (user_email, refresh_token, access_token, expiry_str))
+            logger.info(
+                "save_gmail_token: INSERTED new token for %s in db_path=%s",
+                user_email, os.path.abspath(DB_NAME),
+            )
 
 
 def get_gmail_token(user_email: str):
@@ -302,6 +373,14 @@ def update_gmail_access_token(user_email: str, access_token: str, token_expiry=N
 
 
 def delete_gmail_token(user_email: str):
+    # TEMP DIAGNOSTIC LOGGING — this is the ONLY code path in the entire
+    # codebase that deletes from gmail_tokens. If Gmail connection ever
+    # appears lost without the user explicitly disconnecting, this log line
+    # tells you definitively whether this function was ever called.
+    logger.warning(
+        "delete_gmail_token: DELETING token for %s from db_path=%s",
+        user_email, os.path.abspath(DB_NAME),
+    )
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM gmail_tokens WHERE user_email = ?", (user_email,))
@@ -320,4 +399,69 @@ def setup_database():
     create_gmail_tokens_table()
 
 
+# =========================
+# TEMP DIAGNOSTICS — sender persistence investigation
+# =========================
+# This function is purely read-only. It does not modify any data. It exists
+# so we can prove, with hard evidence, whether senders are being deleted by
+# application code or whether the underlying SQLite *file* itself is being
+# reset/replaced (e.g. by an ephemeral filesystem on the host). Call
+# GET /api/debug/db-status (added in main.py) before and after a
+# "disappearance" event and compare:
+#   - same `db_path`, same/growing `db_file_mtime`, but `senders_count` drops
+#       -> a real delete is happening somewhere in the app (we've audited
+#          every sender code path and found none, so this would point to
+#          something outside the files reviewed, e.g. a process restarting
+#          a *different* copy of the codebase).
+#   - `db_file_mtime` resets to "just started" / `db_file_size_bytes` drops
+#     back to a fresh-empty-db size right when sender data disappears
+#       -> the SQLite file itself is being wiped/recreated, i.e. it is not
+#          durably persisted across process restarts (ephemeral disk).
+#          This is the most common cause of this exact symptom pattern on
+#          platforms like Render without an attached persistent disk.
+def get_db_diagnostics() -> dict:
+    info: dict = {
+        "db_path": os.path.abspath(DB_NAME),
+        "db_file_exists": os.path.exists(DB_NAME),
+    }
+    try:
+        stat = os.stat(DB_NAME)
+        info["db_file_size_bytes"] = stat.st_size
+        info["db_file_mtime"] = stat.st_mtime
+    except OSError:
+        info["db_file_size_bytes"] = None
+        info["db_file_mtime"] = None
+
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM users")
+            info["users_count"] = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM senders")
+            info["senders_count"] = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT id, user_id, name, email FROM senders ORDER BY id"
+            )
+            info["senders_rows"] = [dict(r) for r in cursor.fetchall()]
+            cursor.execute("SELECT COUNT(*) FROM gmail_tokens")
+            info["gmail_tokens_count"] = cursor.fetchone()[0]
+    except Exception as e:
+        info["query_error"] = str(e)
+
+    return info
+
+
 setup_database()
+
+# TEMP DIAGNOSTIC LOGGING — printed once per process start. If you see this
+# line fire with a *different* db_path than before, or fire unexpectedly
+# (i.e. you didn't expect a restart), that's direct evidence the backend
+# process restarted — and on hosts without a persistent disk, a restart
+# means the SQLite file area was reset, which would explain senders
+# "disappearing" even though no application code deleted them.
+logger.warning(
+    "DATABASE MODULE LOADED — db_path=%s exists=%s size_bytes=%s",
+    os.path.abspath(DB_NAME),
+    os.path.exists(DB_NAME),
+    os.path.getsize(DB_NAME) if os.path.exists(DB_NAME) else None,
+)

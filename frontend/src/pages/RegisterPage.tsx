@@ -5,6 +5,29 @@ import { Mail, Lock, User, Phone, Sparkles, Moon, Sun } from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
 import { motion } from 'framer-motion';
 
+// ── ORGANIZATIONAL DOMAIN VALIDATION ───────────────────────────────────────
+// This constant and helper are used ONLY during platform registration for the
+// "organization" role. They do not affect individual accounts, SMTP senders,
+// Gmail OAuth sender connections, or any email-sending functionality.
+const PERSONAL_EMAIL_DOMAINS = new Set([
+  "gmail.com", "yahoo.com", "yahoo.co.in", "yahoo.co.uk",
+  "outlook.com", "hotmail.com", "hotmail.co.uk", "hotmail.in",
+  "icloud.com", "me.com", "mac.com",
+  "proton.me", "protonmail.com", "protonmail.ch",
+  "live.com", "live.in", "live.co.uk",
+  "aol.com", "ymail.com", "rocketmail.com",
+  "msn.com", "rediffmail.com",
+  "mail.com", "gmx.com", "gmx.net",
+  "tutanota.com", "fastmail.com",
+]);
+
+function isPersonalEmailDomain(email: string): boolean {
+  const parts = email.trim().toLowerCase().split("@");
+  if (parts.length !== 2) return false;
+  return PERSONAL_EMAIL_DOMAINS.has(parts[1]);
+}
+// ────────────────────────────────────────────────────────────────────────────
+
 const RegisterPage: React.FC = () => {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -20,6 +43,20 @@ const RegisterPage: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+
+    // ── ORGANIZATIONAL DOMAIN CHECK (client-side early feedback) ─────────────
+    // Provides instant feedback before the API call. The backend /api/register
+    // enforces the same rule. Only applies to the "organization" role.
+    // Individual accounts, Gmail OAuth sender flows, and SMTP are unaffected.
+    if (role === 'organization' && isPersonalEmailDomain(email)) {
+      setError(
+        'Only organizational email accounts are allowed to access this platform. ' +
+        'Please use your company or organization email address (e.g. you@yourcompany.com).'
+      );
+      return;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     setLoading(true);
     try {
       await register({

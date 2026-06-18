@@ -118,6 +118,7 @@ from app.database import (
     init_db,
     create_user,
     get_user_by_email,
+    update_user_domain,
     create_senders_table,
     add_sender,
     get_senders,
@@ -565,6 +566,211 @@ def _extract_uid_list_from_text(text: str) -> list[str]:
     return []
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# EMAIL-NUMBER ↔ UID MAPPING LAYER
+#
+# These helpers are the ONLY new code that touches UID resolution.
+# All existing _apply_email_action() / IMAP code is completely unchanged.
+# ════════════════════════════════════════════════════════════════════════════
+
+def _extract_email_number_from_text(text: str) -> int | None:
+    """
+    Parse the display number the user typed, e.g.:
+      "move email 3 to spam"  → 3
+      "archive #2"            → 2
+      "mark number 1 read"    → 1
+      "reply to 4"            → 4
+    Returns None if no number found.
+    Does NOT parse raw UID patterns — those are handled by legacy code that
+    is no longer reached when a number is resolved here.
+    """
+    q = (text or "").strip()
+    patterns = [
+        r"\bemail\s*#?\s*(\d{1,4})\b",          # email 3 / email #3
+        r"\b#\s*(\d{1,4})\b",                     # #2
+        r"\bnumber\s+(\d{1,4})\b",                # number 1
+        r"\bmail\s*#?\s*(\d{1,4})\b",            # mail 2
+        r"\bmessage\s*#?\s*(\d{1,4})\b",         # message 4
+        r"\bitem\s*#?\s*(\d{1,4})\b",            # item 1
+        r"^(\d{1,4})$",                              # bare digit as entire input
+        r"^(\d{1,4})\s*[.,)]",                      # "1." at start of reply
+    ]
+    for pat in patterns:
+        m = re.search(pat, q, flags=re.IGNORECASE)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                pass
+    return None
+
+
+def _resolve_email_number_to_uid(number: int) -> str | None:
+    """
+    Look up a display number in the session email_number_map.
+    Returns the raw UID string or None if the number is not in the map.
+    Safe to call at any time; returns None rather than raising.
+    """
+    mapping: dict = state.get("email_number_map") or {}  # type: ignore[assignment]
+    return mapping.get(number)
+
+
+def _resolve_sender_or_subject_to_uid(
+    question: str,
+    snippets: list[dict[str, Any]],
+) -> tuple[str | None, str | None]:
+    """
+    Try to resolve a natural-language email reference that names a
+    sender or subject keyword rather than an email number.
+
+    Returns (uid, disambiguation_message):
+      - If exactly one match:  (uid, None)
+      - If multiple matches:   (None, formatted_clarification_message)
+      - If no match:           (None, None)
+
+    Examples handled:
+      "move latest email from Prerana to spam"
+      "archive the interview email"
+      "mark the newest Google email important"
+
+    When multiple emails match we store the candidates in
+    state["disambiguation_candidates"] so the follow-up "email 2"
+    resolves against them.  UIDs are never included in the returned
+    clarification message.
+    """
+    if not snippets:
+        return None, None
+
+    q = (question or "").lower()
+
+    # ── Named-sender filter ───────────────────────────────────────────────
+    sender_hint = _extract_sender_from_question(question)
+
+    # ── Subject keyword filter ────────────────────────────────────────────
+    subj_hint: str | None = None
+    m_subj = re.search(
+        r"(?:about|subject|titled?|regarding|re[:]?\s+)\s+[\"']?([\w\s]{2,40})[\"']?",
+        q, flags=re.IGNORECASE,
+    )
+    if m_subj:
+        subj_hint = m_subj.group(1).strip().lower()
+
+    if not sender_hint and not subj_hint:
+        return None, None
+
+    # ── Filter snippets ───────────────────────────────────────────────────
+    candidates = list(snippets)
+    if sender_hint:
+        candidates = [
+            s for s in candidates
+            if sender_hint in (s.get("from") or "").lower()
+            or sender_hint in (s.get("sender_email") or "").lower()
+        ]
+    if subj_hint:
+        candidates = [
+            s for s in candidates
+            if subj_hint in (s.get("subject") or "").lower()
+        ]
+
+    # ── "Latest" modifier shortcircuits to first result ──────────────────
+    if any(t in q for t in ("latest", "last", "most recent", "newest")) and candidates:
+        candidates = [candidates[0]]
+
+    if not candidates:
+        return None, None
+
+    if len(candidates) == 1:
+        uid = (candidates[0].get("uid") or "").strip()
+        return uid or None, None
+
+    # ── Multiple matches — ask for clarification ──────────────────────────
+    # Store candidates in state so that "email 2" in the next turn works.
+    # We build a NEW numbered map from this candidate sub-list and merge
+    # it over the existing map so any previously-shown numbers still resolve.
+    new_map: dict[int, str] = dict(state.get("email_number_map") or {})  # type: ignore
+    disambig_lines = [
+        f"I found multiple emails matching your request:\n"
+    ]
+    for i, s in enumerate(candidates[:10], start=1):
+        uid = (s.get("uid") or "").strip()
+        subj = (s.get("subject") or "(No subject)").strip()[:60]
+        frm = (s.get("from") or "Unknown").strip()
+        date = (s.get("date") or "")[:10]
+        if uid:
+            new_map[i] = uid
+        disambig_lines.append(f"  {i}. **{frm}** — {subj} ({date})")
+
+    state["email_number_map"] = new_map
+    state["disambiguation_candidates"] = candidates[:10]
+
+    disambig_lines.append(
+        "\nWhich email would you like to act on? "
+        "(Reply with the number, e.g. \"email 2\")"
+    )
+    return None, "\n".join(disambig_lines)
+
+
+def _resolve_user_email_reference(
+    question: str,
+    chat_action: str,
+) -> tuple[str | None, str | None]:
+    """
+    Master resolver: given a user question that contains an email action
+    command, return (uid, error_or_disambiguation_message).
+
+    Resolution order (first hit wins):
+      1. Display number ("email 3", "#2", "message 1")
+      2. Keyword "latest / last / most recent / newest" → first inbox email
+      3. Sender name / subject keyword with disambiguation
+      4. Legacy UID pattern (uid 12345) — backward compatibility only;
+         never shown to users but can still be used programmatically
+
+    Returns:
+      (uid, None)            – resolved successfully, proceed with action
+      (None, message)        – needs user clarification or hard error
+      (None, None)           – could not resolve, fall through to legacy path
+    """
+    q = (question or "").strip()
+
+    # 1️⃣  Display number
+    num = _extract_email_number_from_text(q)
+    if num is not None:
+        uid = _resolve_email_number_to_uid(num)
+        if uid:
+            return uid, None
+        # Number was given but not in map — stale context
+        return None, (
+            f"I don't have email #{num} in the current list. "
+            "Please ask me to list your emails first, then use the numbers I show."
+        )
+
+    # 2️⃣  "Latest / last" shortcut
+    if any(t in q.lower() for t in ("latest", "last", "most recent", "newest")):
+        snippets = _fetch_inbox_snippets(None, None, 1, include_body=False, unread_only=False)
+        if snippets:
+            uid = (snippets[0].get("uid") or "").strip()
+            if uid:
+                return uid, None
+
+    # 3️⃣  Sender name / subject keyword (with disambiguation)
+    snippets = _fetch_inbox_snippets(None, None, 50, include_body=False, unread_only=False)
+    uid, disambig = _resolve_sender_or_subject_to_uid(question, snippets)
+    if uid:
+        return uid, None
+    if disambig:
+        return None, disambig
+
+    # 4️⃣  Legacy UID fallback — for backward compatibility only.
+    #    This branch is never reachable through the normal UI because the
+    #    frontend no longer exposes raw UIDs.  It exists so that API callers
+    #    or curl scripts that already know a UID can still pass it directly.
+    legacy_uid = _extract_uid_from_text(q)
+    if legacy_uid:
+        return legacy_uid, None
+
+    return None, None
+
+
 def _extract_limit_from_text(text: str, default_limit: int = 10, max_limit: int = 50) -> int:
     q = (text or "").lower()
     m = re.search(r"\b(?:top|last|latest|recent|first)\s+(\d{1,3})\b", q)
@@ -580,23 +786,60 @@ def _extract_limit_from_text(text: str, default_limit: int = 10, max_limit: int 
 
 
 def _format_email_list(snippets: list[dict[str, Any]]) -> str:
+    """
+    Render a numbered list of emails for the user and simultaneously
+    update the session-level email_number_map so that subsequent
+    commands like "move email 2 to spam" can resolve back to the
+    correct internal UID without ever exposing raw UIDs to the user.
+
+    UID exposure rules enforced here:
+      - No UID is printed in the returned string.
+      - state["email_number_map"] is atomically overwritten with the
+        new mapping so that stale numbers from a previous list can
+        never be accidentally resolved.
+    """
     if not snippets:
         return "No emails found."
 
+    # ── Build and STORE the display-number → UID mapping ──────────────────
+    # This is the single source of truth for all subsequent email-number
+    # resolution.  We overwrite (not merge) so old mappings never linger.
+    new_map: dict[int, str] = {}
+    for idx, e in enumerate(snippets, start=1):
+        uid = (e.get("uid") or "").strip()
+        if uid:
+            new_map[idx] = uid
+    state["email_number_map"] = new_map  # atomic overwrite
+    # Clear any lingering disambiguation context from a previous interaction
+    state["disambiguation_candidates"] = []
+    # ──────────────────────────────────────────────────────────────────────
+
     lines = [f"📧 Found {len(snippets)} email(s):\n"]
     for idx, e in enumerate(snippets, start=1):
-        subject = (e.get("subject") or "(No subject)").strip()[:60]
-        sender = (e.get("from") or "").strip() or "Unknown"
-        # Shorten date
-        date = (e.get("date", "")[:10]) if e.get("date") else ""
-        seen = "✅" if not e.get("seen", False) else "📖"
-
-        # Truncate subject if too long
+        subject = (e.get("subject") or "(No subject)").strip()
+        # Trim long subjects with ellipsis
         if len(subject) > 55:
             subject = subject[:55] + "..."
+        # Show display name when available, fall back to raw From header
+        sender = (e.get("from") or "").strip() or "Unknown"
+        date_raw = (e.get("date") or "")[:10]  # YYYY-MM-DD portion only
+        seen_icon = "🔵" if not e.get("seen", False) else "📖"  # blue = unread
+        # Short body preview (no UID leakage possible here)
+        preview = (e.get("body") or "").strip().replace("\n", " ")[:80]
+        preview_text = f"\n   💬 {preview}…" if preview else ""
 
-        lines.append(f"{idx}. {seen} **{sender}**\n   📅 {date} | {subject}")
+        # Format: number. icon  From | Subject | Date
+        # UID is deliberately absent from this output.
+        lines.append(
+            f"{idx}. {seen_icon} **{sender}**\n"
+            f"   📌 {subject}\n"
+            f"   📅 {date_raw}{preview_text}"
+        )
 
+    lines.append(
+        "\n💡 To act on an email, say: "
+        "\"Move email 2 to spam\", \"Archive email 1\", \"Mark email 3 important\""
+    )
     return "\n".join(lines)
 
 
@@ -626,27 +869,49 @@ def _handle_prompt_command(question: str, max_emails: int = 10) -> dict[str, Any
             "senders_used": len({s.get("sender_email", "") for s in snippets if s.get("sender_email")}),
         }
 
-    # 1) Full email by UID / latest
+    # 1) Full email by email-number / latest
     if any(k in ql for k in ("full email", "open email", "read email", "read latest", "read last", "show email", "email body", "details of")):
-        uid = _extract_uid_from_text(q)
+        uid: str | None = None
+        display_label = "the email"
+
+        # ── Try display-number resolution first ────────────────────────────
+        num = _extract_email_number_from_text(q)
+        if num is not None:
+            uid = _resolve_email_number_to_uid(num)
+            display_label = f"email {num}"
+
+        # ── Fall back to "latest" shortcut ─────────────────────────────────
         if not uid and any(t in ql for t in ("latest", "last", "most recent", "newest")):
             latest = _fetch_inbox_snippets(None, None, 1, include_body=False, unread_only=False)
             uid = (latest[0].get("uid") or "").strip() if latest else None
+            display_label = "your latest email"
+
+        # ── Legacy UID fallback (backward compat only) ─────────────────────
+        if not uid:
+            uid = _extract_uid_from_text(q)
+            if uid:
+                display_label = "the email"
+
         if uid:
             full = _imap_fetch_full_email(uid)
             body = (full.get("body") or "").strip()
             return {
                 "success": True,
                 "intent": "chat_open_email",
-                "answer": f"Full email for UID {uid}:\n\n{body if body else '(empty body)'}",
+                # UID is intentionally excluded from the answer string
+                "answer": f"📧 Here is {display_label}:\n\n{body if body else '(empty body)'}",
                 "emails_used": 1,
                 "senders_used": 0,
-                "uid": uid,
             }
         return {
             "success": True,
-            "intent": "chat_open_email_missing_uid",
-            "answer": "Please provide UID, e.g. 'open email uid 12345', or ask 'open latest email'.",
+            "intent": "chat_open_email_missing_ref",
+            "answer": (
+                "Which email would you like to open? "
+                "First list your emails (e.g. \"Show my inbox\") "
+                "then say \"Open email 2\" using the number I showed you. "
+                "Or say \"Open latest email\" to read the most recent one."
+            ),
             "emails_used": 0,
             "senders_used": 0,
         }
@@ -836,23 +1101,53 @@ def _handle_prompt_command(question: str, max_emails: int = 10) -> dict[str, Any
     # 4) Bulk actions from command
     chat_action = _extract_chat_action(q)
     if chat_action:
-        uid_list = _extract_uid_list_from_text(q)
+        # ── NEW: resolve display numbers for bulk actions ─────────────────
+        # Parse patterns like "email 1, 3 and 5" or "emails 2 4 6"
+        # and resolve each number through the session mapping.
+        # Raw UID patterns (uid 12345) are still supported as a legacy
+        # fallback but are never surfaced to the user.
+        # ─────────────────────────────────────────────────────────────────
+        # Look for multiple display numbers in the question
+        num_hits = re.findall(
+            r"(?:email|mail|message|item|#)?\s*#?(\d{1,4})(?=[\s,;.!?]|$)",
+            q, flags=re.IGNORECASE,
+        )
+        uid_list: list[str] = []
+        for raw_num in num_hits:
+            try:
+                n = int(raw_num)
+                uid = _resolve_email_number_to_uid(n)
+                if uid and uid not in uid_list:
+                    uid_list.append(uid)
+            except ValueError:
+                pass
+
+        # Fallback to legacy UID extraction if no numbers resolved
+        if not uid_list:
+            uid_list = _extract_uid_list_from_text(q)
+
         if len(uid_list) > 1:
             done = 0
-            failed: list[str] = []
+            failed_nums: list[str] = []
+            mapping: dict = state.get("email_number_map") or {}  # type: ignore
+            rev_map = {v: k for k, v in mapping.items()}
             for uid in uid_list:
                 try:
                     _apply_email_action(chat_action, uid)
                     done += 1
                 except Exception:
-                    failed.append(uid)
+                    # Report by display number, not raw UID
+                    label = f"email {rev_map[uid]}" if uid in rev_map else "an email"
+                    failed_nums.append(label)
+            failed_note = (
+                f" (Could not act on: {', '.join(failed_nums)})" if failed_nums else ""
+            )
             return {
                 "success": True,
                 "intent": "chat_bulk_action_executed",
                 "answer": (
-                    f"Bulk action '{chat_action}' completed. Success: {done}, Failed: {len(failed)}. "
-                    f"{('Failed UIDs: ' + ', '.join(failed)) if failed else ''}"
-                ).strip(),
+                    f"✅ Bulk action completed. {done} email(s) updated{failed_note}."
+                ),
                 "emails_used": len(uid_list),
                 "senders_used": 0,
                 "action_requested": chat_action,
@@ -1273,27 +1568,50 @@ def email_insights_query(payload: PromptQueryRequest):
 
     chat_action = _extract_chat_action(payload.question)
     if chat_action:
-        explicit_uid = _extract_uid_from_text(payload.question)
-        resolved_uid = _resolve_uid_for_chat_action(payload.question, explicit_uid)
+        # ── NEW: user-friendly email-number resolution ──────────────────────
+        # _resolve_user_email_reference() tries (in order):
+        #   1. display number  ("email 3", "#2")
+        #   2. latest/newest shortcut
+        #   3. sender name / subject keyword (with disambiguation)
+        #   4. legacy raw-UID fallback for backward compatibility
+        # Raw UIDs are NEVER shown to the user in success or error messages.
+        # ───────────────────────────────────────────────────────────────────
+        resolved_uid, resolution_msg = _resolve_user_email_reference(
+            payload.question, chat_action
+        )
         if not resolved_uid:
+            # Either disambiguation needed or genuinely missing reference
+            answer = resolution_msg or (
+                "I couldn't identify which email to act on. "
+                "Please list your emails first (e.g. \"Show my inbox\") "
+                "then say \"Move email 2 to spam\" using the number I showed you."
+            )
             return {
                 "success": True,
-                "intent": "chat_action_missing_uid",
-                "answer": (
-                    "I detected an email action command, but no UID was provided. "
-                    "Please ask like: 'mark read uid 12345' or 'move latest email to spam'."
-                ),
+                "intent": "chat_action_missing_ref",
+                "answer": answer,
                 "emails_used": 0,
                 "senders_used": 0,
                 "action_requested": chat_action,
             }
+        # ── Execute the action with the resolved UID (backend unchanged) ────
         result = _apply_email_action(chat_action, resolved_uid)
+        # Confirm success without leaking the raw UID to the user.
+        # We report by subject/sender instead.
+        acted_subject = ""
+        try:
+            mapping: dict = state.get("email_number_map") or {}  # type: ignore
+            rev = {v: k for k, v in mapping.items()}
+            display_num = rev.get(resolved_uid)
+            if display_uid_label := (f"email {display_num}" if display_num else ""):
+                acted_subject = f" ({display_uid_label})"
+        except Exception:
+            pass
         return {
             "success": True,
             "intent": "chat_action_executed",
             "answer": (
-                f"Action completed: {result.get('message', 'Done')} "
-                f"(uid: {result.get('uid', resolved_uid)})."
+                f"✅ Done! {result.get('message', 'Action completed')}{acted_subject}."
             ),
             "emails_used": 0,
             "senders_used": 0,
@@ -1883,6 +2201,74 @@ def hash_password(password: str):
 
 
 # ════════════════════════════════════════════
+# ORGANIZATIONAL DOMAIN VALIDATION
+# ════════════════════════════════════════════
+# List of well-known personal/consumer email providers that are NOT allowed
+# for organizational platform accounts. This list is intentionally broad to
+# cover common free providers. It is ONLY checked during platform login/register
+# for the "organizational" role — individual users and all email-sending flows
+# (SMTP, Gmail OAuth sender connection, etc.) are completely unaffected.
+PERSONAL_EMAIL_DOMAINS: set[str] = {
+    "gmail.com",
+    "yahoo.com",
+    "yahoo.co.in",
+    "yahoo.co.uk",
+    "outlook.com",
+    "hotmail.com",
+    "hotmail.co.uk",
+    "hotmail.in",
+    "icloud.com",
+    "me.com",         # Apple iCloud alias
+    "mac.com",        # Apple iCloud alias
+    "proton.me",
+    "protonmail.com",
+    "protonmail.ch",
+    "live.com",
+    "live.in",
+    "live.co.uk",
+    "aol.com",
+    "ymail.com",
+    "rocketmail.com",
+    "msn.com",
+    "rediffmail.com",
+    "zohomail.com",   # free personal Zoho tier (note: paid Zoho Business is allowed)
+    "mail.com",
+    "gmx.com",
+    "gmx.net",
+    "tutanota.com",
+    "fastmail.com",
+}
+
+
+def is_personal_email_domain(email: str) -> bool:
+    """
+    Returns True if the email belongs to a known personal/consumer provider.
+
+    This helper is ONLY used at platform registration and platform login for
+    organisational accounts. It is deliberately NOT called anywhere in the
+    sender-management, SMTP, Gmail OAuth, or email-sending code paths.
+    """
+    try:
+        domain = email.strip().lower().split("@", 1)[1]
+    except IndexError:
+        return False   # malformed — let the existing format validator handle it
+    return domain in PERSONAL_EMAIL_DOMAINS
+
+
+def extract_email_domain(email: str) -> str | None:
+    """
+    Extracts and returns the lowercase domain portion of an email address
+    (e.g. "employee@Company.com" -> "company.com"). Returns None if the
+    email is malformed. Used ONLY for organizational accounts, to persist
+    the domain alongside the user record per the org-login requirements.
+    """
+    try:
+        return email.strip().lower().split("@", 1)[1]
+    except IndexError:
+        return None
+
+
+# ════════════════════════════════════════════
 # AUTH ENDPOINTS (from AI_Email-shravani)
 # ════════════════════════════════════════════
 @app.post("/api/register")
@@ -1899,6 +2285,28 @@ def register(data: dict):
 
     if not re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", email):
         raise HTTPException(400, "Invalid email format")
+
+    # ── ORGANIZATIONAL DOMAIN CHECK ──────────────────────────────────────────
+    # Only organizational platform accounts are restricted to company domains.
+    # Individual accounts, SMTP senders, Gmail OAuth sender connections, and
+    # all email-sending flows are completely unaffected by this check.
+    # NOTE (FIX): the frontend (RegisterPage.tsx) sends role="organization",
+    # not "organizational" — the previous check compared against the wrong
+    # string and therefore never actually fired. Comparing against
+    # "organization" here makes the check effective.
+    if role == "organization" and is_personal_email_domain(email):
+        raise HTTPException(
+            400,
+            "Only organizational email accounts are allowed to access this platform. "
+            "Please use your company or organization email address (e.g. you@yourcompany.com)."
+        )
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ── EXTRACT & STORE DOMAIN (organization accounts only) ───────────────────
+    # Individual accounts keep domain=None; nothing else about their record
+    # changes.
+    domain = extract_email_domain(email) if role == "organization" else None
+    # ─────────────────────────────────────────────────────────────────────────
 
     if not phone.isdigit() or len(phone) != 10:
         raise HTTPException(400, "Phone must be 10 digits")
@@ -1921,7 +2329,8 @@ def register(data: dict):
         phone,
         password,
         role,
-        app_password if role == "individual" else None
+        app_password if role == "individual" else None,
+        domain,  # NEW: persists the extracted domain for organization accounts
     )
 
     if not success:
@@ -1942,8 +2351,40 @@ def login(data: dict):
     if not user:
         raise HTTPException(400, "User not found")
 
+    # ── ORGANIZATIONAL DOMAIN CHECK ──────────────────────────────────────────
+    # Enforce the company-domain policy at login too, blocking any organizational
+    # account (even pre-existing ones) that uses a personal email provider.
+    # Individual users, and all email-sending/SMTP/OAuth flows, are unaffected.
+    # NOTE (FIX): same role-string fix as in /api/register — the frontend
+    # sends role="organization", so we must compare against "organization"
+    # (not "organizational") for this check to actually take effect.
+    if user.get("role") == "organization" and is_personal_email_domain(email):
+        raise HTTPException(
+            400,
+            "Only organizational email accounts are allowed to access this platform. "
+            "Please use your company or organization email address."
+        )
+    # ─────────────────────────────────────────────────────────────────────────
+
     if hash_password(password) != user["password"]:
         raise HTTPException(400, "Invalid password")
+
+    # ── PERSIST/REFRESH ORGANIZATIONAL DOMAIN ─────────────────────────────────
+    # Requirement: after a successful organizational login, the user's
+    # organizational email + extracted domain must be stored in the DB.
+    # The account itself is "created" at /api/register (login requires an
+    # existing, password-verified account — there's no separate OAuth-based
+    # platform login in this app), so here we cover the "update if exists"
+    # half of that requirement: we backfill/refresh the `domain` column for
+    # any organization account where it's missing or stale (e.g. accounts
+    # created before this column existed). No other user field is touched,
+    # and individual accounts are completely unaffected.
+    if user.get("role") == "organization":
+        current_domain = extract_email_domain(email)
+        if current_domain and user.get("domain") != current_domain:
+            update_user_domain(email, current_domain)
+            user["domain"] = current_domain
+    # ─────────────────────────────────────────────────────────────────────────
 
     state["current_user"] = user
     if user["role"] == "individual":
@@ -2100,6 +2541,18 @@ state: dict[str, object] = {
         "current_email": None,
         "results": [],
     },
+    # ── EMAIL NUMBER → UID MAPPING ─────────────────────────────────────────
+    # Maps the 1-based display numbers shown to the user back to raw IMAP
+    # UIDs.  Updated each time the AI renders a numbered email list.
+    # Structure:  { 1: "uid_101", 2: "uid_105", 3: "uid_110", … }
+    # The map is overwritten on every new list so stale references never
+    # silently resolve to the wrong email.
+    "email_number_map": {},
+    # ── DISAMBIGUATION CANDIDATES ──────────────────────────────────────────
+    # Populated when a sender-name or subject-keyword matches multiple
+    # emails and the AI asks the user to clarify.  The follow-up "email N"
+    # reply is resolved against these candidates, not the full inbox.
+    "disambiguation_candidates": [],
 }
 
 

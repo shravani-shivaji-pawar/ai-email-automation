@@ -235,10 +235,34 @@ def auth_ui():
             password = st.text_input("Password", type="password", key="reg_pass")
 
         if st.button("Register", use_container_width=True):
+            # ── ORGANIZATIONAL DOMAIN CHECK (UI-side early feedback) ─────────
+            # Check happens before the API call so the user gets instant
+            # feedback.  The backend /api/register enforces this too.
+            # This check only applies to the "organizational" role.
+            # Individual accounts and all email-sending flows are unaffected.
+            _PERSONAL_DOMAINS = {
+                "gmail.com", "yahoo.com", "yahoo.co.in", "outlook.com",
+                "hotmail.com", "icloud.com", "me.com", "mac.com",
+                "proton.me", "protonmail.com", "live.com", "live.in",
+                "aol.com", "ymail.com", "msn.com", "rediffmail.com",
+                "mail.com", "gmx.com", "tutanota.com", "fastmail.com",
+            }
+            def _is_personal(addr: str) -> bool:
+                try:
+                    return addr.strip().lower().split("@", 1)[1] in _PERSONAL_DOMAINS
+                except IndexError:
+                    return False
+            # ─────────────────────────────────────────────────────────────────
             if len(name.strip()) < 3:
                 st.error("Name must be at least 3 characters")
             elif not re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", email):
                 st.error("Enter a valid email")
+            elif role == "organizational" and _is_personal(email):
+                st.error(
+                    "Only organizational email accounts are allowed to access this platform. "
+                    "Please use your company or organization email address "
+                    "(e.g. you@yourcompany.com)."
+                )
             elif not phone.isdigit() or len(phone) != 10:
                 st.error("Phone must be 10 digits")
             elif role == "organizational" and len(password) < 6:
