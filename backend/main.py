@@ -3266,20 +3266,11 @@ def init_manual_sender(subject: str, message_template: str):
     email_column = state.get("email_column")
     attachments = state.get("attachments", [])
 
-    # Use active_sender if set, else fallback to .env SMTP
-    active = state.get("active_sender")
-    if active:
-        from app.email_ssl_service import SMTPSettings
-        smtp = SMTPSettings(
-            host="smtp.gmail.com",
-            port=465,
-            user=active["email"],
-            password=active["password"],
-            from_addr=active["email"],
-            use_tls=True,
-        )
-    else:
-        smtp = load_smtp_settings()
+    # Pass the active_sender dict so ManualEmailSender can choose
+    # Gmail API (if connected) or build SMTPSettings at send-time.
+    active = state.get("active_sender")  # dict or None
+    # Always load env SMTP as final fallback regardless of active sender
+    smtp_fallback = load_smtp_settings()
 
     emails = []
     for row in rows:
@@ -3291,7 +3282,7 @@ def init_manual_sender(subject: str, message_template: str):
         body = personalize_message(message_template, row, first_name_column)
         personalized_subject = personalize_message(subject, row, first_name_column) if subject else subject
         emails.append({"to": to_addr, "subject": personalized_subject, "body": body, "attachments": attachments})
-    sender = ManualEmailSender(emails, smtp, state)
+    sender = ManualEmailSender(emails, active, smtp_fallback, state)
     sender.current_index = 0
     _extend_sender(sender)
     state["manual_sender"] = sender

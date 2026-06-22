@@ -15,7 +15,6 @@ if TYPE_CHECKING:
 
 DEFAULT_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 
-
 @dataclass(frozen=True)
 class VectorHit:
     uid: str

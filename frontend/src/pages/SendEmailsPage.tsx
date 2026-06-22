@@ -177,7 +177,15 @@ const SendEmailsPage: React.FC = () => {
       if (skip) {
         await sendManualByIndex(index, true);
       } else {
-        await sendManualByIndex(index, false, manualSubject, manualMessage);
+        // FIX: The backend returns HTTP 200 even when the email fails to send
+        // (status: "failed" in the body). Previously we only caught network/HTTP
+        // errors, so a "failed" response was silently ignored — the UI reloaded
+        // the list and showed "Failed" with no explanation. Now we explicitly
+        // check the response body and surface the error message to the user.
+        const res = await sendManualByIndex(index, false, manualSubject, manualMessage);
+        if (res.data?.status === 'failed') {
+          alert(`Send failed: ${res.data.error || 'Unknown error. Check sender credentials.'}`);
+        }
       }
       await loadManualList();
     } catch (err: any) {

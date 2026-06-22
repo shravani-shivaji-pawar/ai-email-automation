@@ -40,12 +40,36 @@ def load_smtp_settings() -> SMTPSettings | None:
 
 
 def send_email_smtp(
-    to_addr: str,
-    subject: str,
-    body: str,
-    settings: SMTPSettings,
-    attachments=None
+    to_addr: str = None,
+    subject: str = None,
+    body: str = None,
+    settings: SMTPSettings = None,
+    attachments=None,
+    # Legacy keyword-arg style used in bulk worker
+    smtp_email: str = None,
+    smtp_password: str = None,
+    to_email: str = None,
+    smtp_settings: SMTPSettings = None,
 ) -> None:
+    # ── Normalise arguments ──────────────────────────────────────────────────
+    # Support: send_email_smtp(to_addr, subject, body, settings, attachments)
+    # Support: send_email_smtp(smtp_email=..., smtp_password=..., to_email=..., subject=..., body=...)
+    # Support: send_email_smtp(smtp_settings=..., to_email=..., subject=..., body=...)
+    if to_email and not to_addr:
+        to_addr = to_email
+    if smtp_settings and not settings:
+        settings = smtp_settings
+    if smtp_email and not settings:
+        settings = SMTPSettings(
+            host="smtp.gmail.com",
+            port=465,
+            user=smtp_email,
+            password=smtp_password or "",
+            from_addr=smtp_email,
+            use_tls=True,
+        )
+    if not to_addr or not settings:
+        raise ValueError("send_email_smtp requires to_addr and settings (or smtp_email/smtp_password)")
     print("🔌 Connecting to SMTP server (SSL mode, port 465)...")
     print(f"📤 Preparing to send email to: {to_addr}")
 
